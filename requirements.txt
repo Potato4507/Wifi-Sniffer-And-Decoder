@@ -1,2 +1,2 @@
 numpy>=1.26
-scapy>=2.5
+scapy[basic]>=2.5
