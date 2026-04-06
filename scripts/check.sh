@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Repo-root-aware check helper.
 # It uses the local venv when available and auto-installs missing Python
-# requirements for tests from requirements.txt and requirements-dev.txt.
+# requirements for tests from the local package extras (.[dev]).
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -34,10 +34,9 @@ fi
 
 cd "$REPO_ROOT"
 
-if ! "$PYTHON_BIN" -c "import pytest, numpy, scapy" >/dev/null 2>&1; then
+if ! "$PYTHON_BIN" -c "import pytest, build, numpy, scapy" >/dev/null 2>&1; then
     echo "[*] Installing Python check dependencies..."
-    "$PYTHON_BIN" -m pip install -q -r requirements.txt
-    "$PYTHON_BIN" -m pip install -q -r requirements-dev.txt
+    "$PYTHON_BIN" -m pip install -q -e ".[dev]"
 fi
 
 if [[ "$NO_COMPILE" -eq 0 ]]; then

@@ -92,6 +92,27 @@ After setup, this is usually the only command you need:
 .\run_remote.ps1 -Host pi@raspberrypi -Interface wlan0
 ```
 
+### Advanced Windows remote workflow
+
+If you want the raw CLI route instead of the helper scripts:
+
+```powershell
+.\install_deps.ps1
+.\.venv\Scripts\Activate.ps1
+python .\videopipeline.py discover-remote
+python .\videopipeline.py pair-remote --host pi@raspberrypi
+python .\videopipeline.py bootstrap-remote --host pi@raspberrypi --install-profile appliance
+python .\videopipeline.py doctor --host pi@raspberrypi --interface wlan0
+python .\videopipeline.py start-remote --host pi@raspberrypi --interface wlan0 --duration 60 --run all
+```
+
+Notes:
+
+- `discover-remote` looks for appliance-style Linux capture nodes from their health endpoint
+- `bootstrap-remote` installs the managed capture agent and remote helper scripts
+- `doctor` is the fastest way to find SSH, privilege, or interface issues before a live run
+- `remote-service status`, `remote-service start`, and `remote-service last-capture` are useful when you want to control the appliance directly
+
 ## Ubuntu standalone
 
 Use this when you want one Ubuntu machine to do everything locally.
@@ -136,6 +157,20 @@ If your adapter supports monitor mode and you want the Wi-Fi lab workflow:
 ```bash
 sudo python3 videopipeline.py monitor
 sudo python3 videopipeline.py wifi
+```
+
+### Raw CLI route
+
+If you prefer to stay in the CLI after install:
+
+```bash
+./install_deps.sh
+source .venv/bin/activate
+python3 videopipeline.py deps
+python3 videopipeline.py config
+python3 videopipeline.py validate-local --interface wlan0
+python3 videopipeline.py all
+python3 videopipeline.py web
 ```
 
 ## Raspberry Pi OS standalone
@@ -200,6 +235,32 @@ If you want to skip auto-install:
 
 - PowerShell helpers: add `-SkipInstallDeps`
 - shell helpers: add `--no-install-deps`
+
+## Checks and contributor setup
+
+Install the project with contributor tooling:
+
+```bash
+python -m pip install -e ".[dev]"
+```
+
+Run the full test suite:
+
+```bash
+python -m pytest -q
+```
+
+Quick check helpers:
+
+```powershell
+.\scripts\check.ps1
+```
+
+```bash
+bash ./scripts/check.sh
+```
+
+Those helpers resolve the repo root automatically and install missing Python test dependencies from the local package extras if needed.
 
 ## Where results go
 

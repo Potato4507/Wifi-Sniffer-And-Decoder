@@ -35,6 +35,7 @@ classifiers = [
 
 [project.optional-dependencies]
 dev = [
+  "build>=1.2",
   "pytest>=8",
 ]
 
@@ -42,10 +43,10 @@ dev = [
 videopipeline = "wifi_pipeline.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/Dman0627/Wifi-Sniffer-And-Decoder"
-Issues = "https://github.com/Dman0627/Wifi-Sniffer-And-Decoder/issues"
-CI = "https://github.com/Dman0627/Wifi-Sniffer-And-Decoder/actions/workflows/ci.yml"
-Changelog = "https://github.com/Dman0627/Wifi-Sniffer-And-Decoder/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/Potato4507/Wifi-Sniffer-And-Decoder"
+Issues = "https://github.com/Potato4507/Wifi-Sniffer-And-Decoder/issues"
+CI = "https://github.com/Potato4507/Wifi-Sniffer-And-Decoder/actions/workflows/ci.yml"
+Changelog = "https://github.com/Potato4507/Wifi-Sniffer-And-Decoder/blob/main/CHANGELOG.md"
 
 [tool.setuptools.dynamic]
 version = { attr = "wifi_pipeline.__version__" }

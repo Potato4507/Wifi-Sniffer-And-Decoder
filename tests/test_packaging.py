@@ -38,6 +38,32 @@ def test_pyproject_exposes_console_script() -> None:
     assert data["tool"]["setuptools"]["dynamic"]["version"]["attr"] == "wifi_pipeline.__version__"
 
 
+def test_project_metadata_points_at_current_repository() -> None:
+    data = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+    readme = Path("README.md").read_text(encoding="utf-8")
+
+    expected_repo = "https://github.com/Potato4507/Wifi-Sniffer-And-Decoder"
+
+    assert data["project"]["urls"]["Homepage"] == expected_repo
+    assert data["project"]["urls"]["Issues"] == f"{expected_repo}/issues"
+    assert data["project"]["urls"]["CI"] == f"{expected_repo}/actions/workflows/ci.yml"
+    assert data["project"]["urls"]["Changelog"] == f"{expected_repo}/blob/main/CHANGELOG.md"
+    assert f"[![CI]({expected_repo}/actions/workflows/ci.yml/badge.svg)]" in readme
+
+
+def test_dev_installation_uses_pyproject_extras() -> None:
+    data = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+    requirements_dev = Path("requirements-dev.txt").read_text(encoding="utf-8")
+    ci_workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+    release_workflow = Path(".github/workflows/release.yml").read_text(encoding="utf-8")
+
+    assert "build>=1.2" in data["project"]["optional-dependencies"]["dev"]
+    assert "pytest>=8" in data["project"]["optional-dependencies"]["dev"]
+    assert "-e .[dev]" in requirements_dev
+    assert 'python -m pip install ".[dev]"' in ci_workflow
+    assert 'python -m pip install ".[dev]"' in release_workflow
+
+
 def test_build_release_script_creates_portable_zip(tmp_path) -> None:
     build_release = _load_build_release_module()
 

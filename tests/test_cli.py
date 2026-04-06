@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import io
 from pathlib import Path
 
 import pytest
@@ -58,6 +59,20 @@ def test_build_parser_parses_pair_remote_arguments() -> None:
 
     assert args.command == "pair-remote"
     assert args.host == "pi@raspberrypi"
+
+
+def test_build_parser_help_renders_to_cp1252_stream() -> None:
+    parser = cli.build_parser()
+    buffer = io.BytesIO()
+    stream = io.TextIOWrapper(buffer, encoding="cp1252")
+
+    parser.print_help(file=stream)
+    stream.flush()
+
+    output = buffer.getvalue().decode("cp1252")
+    assert "WiFi payload pipeline - official product modes:" in output
+    assert "Full Wi-Fi pipeline: monitor mode -> handshake capture" in output
+    assert "-> WPA2 crack -> airdecap-ng" in output
 
 
 def test_build_parser_parses_discover_remote_arguments() -> None:

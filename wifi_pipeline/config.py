@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import os
 import sys
@@ -64,58 +65,89 @@ DEFAULT_CONFIG = {
 }
 
 
-def load_config(path: Optional[str] = None) -> Dict[str, object]:
-    config = DEFAULT_CONFIG.copy()
-    selected_path = path or "lab.json"
-    if selected_path and os.path.exists(selected_path):
-        with open(selected_path, "r", encoding="utf-8") as handle:
-            config.update(json.load(handle))
-        ok(f"Config loaded from {selected_path}")
+def _copy_default_config() -> Dict[str, object]:
+    return copy.deepcopy(DEFAULT_CONFIG)
+
+
+def _running_environment_model() -> str:
+    if IS_WINDOWS:
+        return "native_windows"
+    if IS_MACOS:
+        return "macos"
+    return "linux"
+
+
+def _emit_status(message: str, *, quiet: bool = False) -> None:
+    if not quiet:
+        ok(message)
+
+
+def _emit_warning(message: str, *, quiet: bool = False) -> None:
+    if not quiet:
+        warn(message)
+
+
+def normalize_config(config: Dict[str, object], *, quiet: bool = False) -> Dict[str, object]:
+    normalized = _copy_default_config()
+    normalized.update(dict(config))
 
     # Correct environment_model for the actual running platform so that
     # platform-specific tool lists and capture paths are always consistent.
-    if IS_WINDOWS and config.get("environment_model") != "native_windows":
-        warn("Overriding environment_model with native_windows on this platform.")
-        config["environment_model"] = "native_windows"
-    elif IS_MACOS and config.get("environment_model") not in ("macos", "linux"):
-        warn("Overriding environment_model with macos on this platform.")
-        config["environment_model"] = "macos"
-    elif not IS_WINDOWS and not IS_MACOS and config.get("environment_model") == "native_windows":
-        warn("Overriding environment_model with linux on this platform.")
-        config["environment_model"] = "linux"
+    expected_model = _running_environment_model()
+    current_model = normalized.get("environment_model")
+    if expected_model == "native_windows" and current_model != "native_windows":
+        _emit_warning("Overriding environment_model with native_windows on this platform.", quiet=quiet)
+        normalized["environment_model"] = "native_windows"
+    elif expected_model == "macos" and current_model not in ("macos", "linux"):
+        _emit_warning("Overriding environment_model with macos on this platform.", quiet=quiet)
+        normalized["environment_model"] = "macos"
+    elif expected_model == "linux" and current_model == "native_windows":
+        _emit_warning("Overriding environment_model with linux on this platform.", quiet=quiet)
+        normalized["environment_model"] = "linux"
 
-    # Back-fill any keys that may be absent in older lab.json files
-    config.setdefault("wpa_password_env", "WIFI_PIPELINE_WPA_PASSWORD")
-    requested_mode = str(config.get("product_mode") or "").strip()
-    resolved_profile = resolve_product_profile(config)
+    requested_mode = str(normalized.get("product_mode") or "").strip()
+    resolved_profile = resolve_product_profile(normalized)
     if requested_mode and requested_mode != resolved_profile.key:
-        warn(f"Overriding product_mode with {resolved_profile.key} on this platform.")
-    config["product_mode"] = resolved_profile.key
-    config.setdefault("wpa_password", "")
-    config.setdefault("wordlist_path", "/usr/share/wordlists/rockyou.txt")
-    config.setdefault("handshake_timeout", 120)
-    config.setdefault("crack_timeout", 600)
-    config.setdefault("deauth_count", 10)
-    config.setdefault("hashcat_rules", "")
-    config.setdefault("monitor_method", "airodump")
-    config.setdefault("remote_interface", "")
-    config.setdefault("remote_install_mode", "auto")
-    config.setdefault("remote_install_profile", "appliance")
-    config.setdefault("remote_health_port", 8741)
-    if not config.get("replay_format_hint"):
-        config["replay_format_hint"] = config.get("video_codec") or "raw"
-    config.setdefault("corpus_review_threshold", 0.62)
-    config.setdefault("corpus_auto_reuse_threshold", 0.88)
-    return config
+        _emit_warning(f"Overriding product_mode with {resolved_profile.key} on this platform.", quiet=quiet)
+    normalized["product_mode"] = resolved_profile.key
+
+    if not normalized.get("replay_format_hint"):
+        normalized["replay_format_hint"] = normalized.get("video_codec") or "raw"
+
+    return normalized
 
 
-def save_config(config: Dict[str, object], path: str = "lab.json") -> None:
-    sanitized = dict(config)
+def load_config(
+    path: Optional[str] = None,
+    *,
+    quiet: bool = False,
+    ignore_errors: bool = False,
+) -> Dict[str, object]:
+    config = _copy_default_config()
+    selected_path = path or "lab.json"
+    if selected_path and os.path.exists(selected_path):
+        try:
+            with open(selected_path, "r", encoding="utf-8") as handle:
+                loaded = json.load(handle)
+            if not isinstance(loaded, dict):
+                raise ValueError(f"Config file must contain a JSON object: {selected_path}")
+            config.update(loaded)
+            _emit_status(f"Config loaded from {selected_path}", quiet=quiet)
+        except (OSError, json.JSONDecodeError, ValueError):
+            if not ignore_errors:
+                raise
+
+    return normalize_config(config, quiet=quiet)
+
+
+def save_config(config: Dict[str, object], path: Optional[str] = "lab.json", *, quiet: bool = False) -> None:
+    sanitized = normalize_config(config, quiet=True)
     # Never persist the raw password to disk
     sanitized["wpa_password"] = ""
-    with open(path, "w", encoding="utf-8") as handle:
+    selected_path = path or "lab.json"
+    with open(selected_path, "w", encoding="utf-8") as handle:
         json.dump(sanitized, handle, indent=2)
-    ok(f"Config saved to {path}")
+    _emit_status(f"Config saved to {selected_path}", quiet=quiet)
 
 
 def resolve_wpa_password(config: Dict[str, object]) -> str:
