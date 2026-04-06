@@ -5,13 +5,20 @@ import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from .ui import BOLD, CYAN, DIM, RESET, ask, confirm, err, info, ok, section, warn
 
 IS_WINDOWS = sys.platform.startswith("win")
 IS_LINUX   = sys.platform.startswith("linux")
 IS_MACOS   = sys.platform == "darwin"
+
+SUPPORTED_PRODUCT_MODES = (
+    "Ubuntu standalone",
+    "Raspberry Pi OS standalone",
+    "Windows 10/11 controller/analyzer + Ubuntu or Raspberry Pi OS remote capture",
+)
+SUPPORTED_PRODUCT_SUMMARY = "; ".join(SUPPORTED_PRODUCT_MODES)
 
 
 @dataclass
@@ -20,6 +27,76 @@ class ToolStatus:
     purpose: str
     required: bool
     path: Optional[str]
+
+
+@dataclass(frozen=True)
+class ProductProfile:
+    key: str
+    label: str
+    official: bool
+    standalone: bool
+    remote_capture: bool
+    description: str
+
+
+@dataclass(frozen=True)
+class CommandSupport:
+    command: str
+    profile: ProductProfile
+    status: str
+    message: str
+
+
+PRODUCT_PROFILES: Dict[str, ProductProfile] = {
+    "ubuntu_standalone": ProductProfile(
+        key="ubuntu_standalone",
+        label="Ubuntu standalone",
+        official=True,
+        standalone=True,
+        remote_capture=True,
+        description="Full local capture and analysis on Ubuntu.",
+    ),
+    "pi_standalone": ProductProfile(
+        key="pi_standalone",
+        label="Raspberry Pi OS standalone",
+        official=True,
+        standalone=True,
+        remote_capture=True,
+        description="Full local capture and analysis on Raspberry Pi OS.",
+    ),
+    "windows_remote": ProductProfile(
+        key="windows_remote",
+        label="Windows 10/11 + Ubuntu/Raspberry Pi OS remote capture",
+        official=True,
+        standalone=False,
+        remote_capture=True,
+        description="Windows controls and analyzes while Linux handles capture.",
+    ),
+    "windows_experimental_local": ProductProfile(
+        key="windows_experimental_local",
+        label="Windows local capture (experimental)",
+        official=False,
+        standalone=False,
+        remote_capture=False,
+        description="Best-effort native Windows capture and Wi-Fi lab path.",
+    ),
+    "linux_best_effort": ProductProfile(
+        key="linux_best_effort",
+        label="Other Linux distro (best effort)",
+        official=False,
+        standalone=True,
+        remote_capture=True,
+        description="Linux workflow outside the official Ubuntu/Raspberry Pi OS targets.",
+    ),
+    "macos_experimental": ProductProfile(
+        key="macos_experimental",
+        label="macOS experimental",
+        official=False,
+        standalone=True,
+        remote_capture=False,
+        description="Experimental macOS workflow.",
+    ),
+}
 
 
 # Tools required/optional on Windows
@@ -90,6 +167,157 @@ def _find_windows_wlanhelper() -> Optional[str]:
     return None
 
 
+def _read_os_release() -> Dict[str, str]:
+    if not IS_LINUX:
+        return {}
+    path = "/etc/os-release"
+    if not os.path.exists(path):
+        return {}
+
+    values: Dict[str, str] = {}
+    with open(path, "r", encoding="utf-8") as handle:
+        for raw_line in handle:
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            values[key] = value.strip().strip('"')
+    return values
+
+
+def _linux_machine_model() -> str:
+    if not IS_LINUX:
+        return ""
+
+    for path in ("/sys/firmware/devicetree/base/model", "/proc/device-tree/model"):
+        if not os.path.exists(path):
+            continue
+        try:
+            return open(path, "r", encoding="utf-8", errors="ignore").read().strip("\x00\r\n ")
+        except OSError:
+            return ""
+    return ""
+
+
+def linux_distribution_label() -> str:
+    if not IS_LINUX:
+        return ""
+
+    data = _read_os_release()
+    pretty = data.get("PRETTY_NAME") or data.get("NAME") or "Linux"
+    model = _linux_machine_model()
+    if "raspberry pi" in pretty.lower():
+        return pretty
+    if "raspberry pi" in model.lower():
+        return f"{pretty} on Raspberry Pi".strip()
+    return pretty
+
+
+def default_product_mode() -> str:
+    if IS_WINDOWS:
+        return "windows_remote"
+    if IS_MACOS:
+        return "macos_experimental"
+    if not IS_LINUX:
+        return "macos_experimental"
+
+    data = _read_os_release()
+    distro_id = data.get("ID", "").strip().lower()
+    pretty = (data.get("PRETTY_NAME") or data.get("NAME") or "").lower()
+    model = _linux_machine_model().lower()
+    if distro_id == "ubuntu":
+        return "ubuntu_standalone"
+    if distro_id == "raspbian" or "raspberry pi os" in pretty or "raspberry pi" in model:
+        return "pi_standalone"
+    return "linux_best_effort"
+
+
+def resolve_product_profile(config: Optional[Dict[str, object]] = None) -> ProductProfile:
+    requested = str((config or {}).get("product_mode") or "").strip().lower().replace("-", "_")
+    detected_key = default_product_mode()
+
+    if requested in PRODUCT_PROFILES:
+        if IS_WINDOWS and requested in ("windows_remote", "windows_experimental_local"):
+            return PRODUCT_PROFILES[requested]
+        if IS_MACOS and requested == "macos_experimental":
+            return PRODUCT_PROFILES[requested]
+        if IS_LINUX and requested == detected_key:
+            return PRODUCT_PROFILES[requested]
+
+    return PRODUCT_PROFILES[detected_key]
+
+
+def command_support(
+    command: str,
+    config: Optional[Dict[str, object]] = None,
+    *,
+    has_input_pcap: bool = False,
+) -> CommandSupport:
+    profile = resolve_product_profile(config)
+
+    analysis_commands = {"config", "deps", "extract", "detect", "analyze", "play", "corpus", "web", "menu"}
+    remote_commands = {"remote", "pair-remote", "bootstrap-remote", "start-remote", "remote-service", "validate-remote", "setup-remote"}
+    local_validation_commands = {"validate-local"}
+    local_capture_commands = {"capture"}
+    local_wifi_commands = {"monitor", "crack", "wifi"}
+
+    if command == "all" and has_input_pcap:
+        command = "extract"
+
+    if command == "doctor":
+        if profile.official:
+            return CommandSupport(command, profile, "official", "")
+        if profile.key == "linux_best_effort":
+            return CommandSupport(command, profile, "best_effort", "Doctor runs outside the official support matrix on this Linux distro.")
+        return CommandSupport(command, profile, "experimental", "Doctor remains available, but this platform is not part of an official product mode.")
+
+    if command in analysis_commands:
+        if profile.key == "macos_experimental":
+            return CommandSupport(command, profile, "experimental", "macOS remains experimental, so analysis commands run in experimental mode here.")
+        if profile.key == "linux_best_effort":
+            return CommandSupport(command, profile, "best_effort", "This Linux distro is outside the official support matrix, so analysis runs in best-effort mode.")
+        return CommandSupport(command, profile, "official", "")
+
+    if command in remote_commands:
+        if profile.key == "windows_remote":
+            return CommandSupport(command, profile, "official", "")
+        if profile.key in ("ubuntu_standalone", "pi_standalone", "linux_best_effort"):
+            return CommandSupport(command, profile, "best_effort", "Remote-controller commands remain available on Linux, but the official Linux modes are standalone.")
+        return CommandSupport(command, profile, "experimental", "Remote-controller commands are not part of the official macOS/experimental workflow.")
+
+    if command in local_validation_commands:
+        if profile.key in ("ubuntu_standalone", "pi_standalone"):
+            return CommandSupport(command, profile, "official", "")
+        if profile.key == "linux_best_effort":
+            return CommandSupport(command, profile, "best_effort", "Standalone validation runs outside the official support matrix on this Linux distro.")
+        if profile.key == "windows_remote":
+            experimental = PRODUCT_PROFILES["windows_experimental_local"]
+            return CommandSupport(command, experimental, "experimental", "Standalone local validation is experimental on Windows because native capture is not an official Windows mode.")
+        return CommandSupport(command, profile, "experimental", "Standalone local validation is not part of an official product mode on this platform.")
+
+    if command in local_capture_commands or (command == "all" and not has_input_pcap):
+        if profile.key in ("ubuntu_standalone", "pi_standalone"):
+            return CommandSupport(command, profile, "official", "")
+        if profile.key == "linux_best_effort":
+            return CommandSupport(command, profile, "best_effort", "Local capture is available, but this Linux distro is outside the official support matrix.")
+        if profile.key == "windows_remote":
+            experimental = PRODUCT_PROFILES["windows_experimental_local"]
+            return CommandSupport(command, experimental, "experimental", "Local capture on Windows is available only through the experimental local-capture profile.")
+        return CommandSupport(command, profile, "experimental", "Local capture is not an official product mode on this platform.")
+
+    if command in local_wifi_commands:
+        if profile.key in ("ubuntu_standalone", "pi_standalone"):
+            return CommandSupport(command, profile, "official", "")
+        if profile.key == "linux_best_effort":
+            return CommandSupport(command, profile, "best_effort", "Local monitor-mode and Wi-Fi lab commands are available, but this distro is outside the official support matrix.")
+        if profile.key == "windows_remote":
+            experimental = PRODUCT_PROFILES["windows_experimental_local"]
+            return CommandSupport(command, experimental, "experimental", "Native Windows monitor-mode and Wi-Fi lab commands remain experimental.")
+        return CommandSupport(command, profile, "experimental", "Monitor-mode and Wi-Fi lab commands are not part of an official product mode on this platform.")
+
+    return CommandSupport(command, profile, "official", "")
+
+
 def is_admin() -> bool:
     if IS_WINDOWS:
         try:
@@ -115,6 +343,7 @@ def relaunch_as_admin(argv: Optional[List[str]] = None) -> None:
 
 def check_environment() -> bool:
     section("Environment Check")
+    profile = resolve_product_profile()
 
     if IS_WINDOWS:
         platform_tools = WINDOWS_TOOLS
@@ -125,6 +354,7 @@ def check_environment() -> bool:
     all_required = True
 
     ok(f"Python runtime: {sys.executable} ({sys.version.split()[0]})")
+    info(f"Active product profile: {profile.label}")
 
     for name, purpose, required in platform_tools:
         if IS_WINDOWS and name.lower().startswith("wlanhelper"):
@@ -156,16 +386,21 @@ def check_environment() -> bool:
             warn("Root (sudo) is required for monitor mode and raw socket capture on Linux/macOS.")
 
     if IS_WINDOWS:
-        info("Supported workflow: use Windows as the controller/analyzer and Raspberry Pi OS or Ubuntu as the remote capture device.")
-        info("Native Windows monitor-mode and Wi-Fi lab capture remain experimental and adapter-dependent.")
+        info("Official Windows mode: controller/analyzer on Windows 10/11 with Ubuntu or Raspberry Pi OS handling remote capture.")
+        info("Ubuntu standalone and Raspberry Pi OS standalone are the Linux-first supported product modes.")
+        warn("Native Windows monitor-mode and Wi-Fi lab capture remain experimental and adapter-dependent.")
         warn("Unsupported as a guaranteed product path: adapter-independent Windows 802.11 monitor/injection parity with Linux.")
     elif IS_LINUX:
-        info("Supported Linux role: Raspberry Pi OS or Ubuntu remote capture device controlled from Windows.")
-        warn("Other Linux distributions may work, but Raspberry Pi OS and Ubuntu are the supported appliance targets.")
+        distro_label = linux_distribution_label()
+        if distro_label:
+            info(f"Detected Linux target: {distro_label}")
+        info("Official Linux modes: Ubuntu standalone and Raspberry Pi OS standalone.")
+        info("The same Linux toolchain can also act as the remote capture side for Windows controller runs.")
+        warn("Other Linux distributions may work, but Ubuntu and Raspberry Pi OS are the only officially supported Linux targets.")
         warn("Raw capture still requires root or capture capabilities even on the supported Linux path.")
     elif IS_MACOS:
-        info("macOS support remains experimental; the primary supported capture path is Raspberry Pi OS or Ubuntu.")
-        warn("macOS is not a supported capture appliance target for the primary workflow.")
+        info("macOS support remains experimental; the official product modes are Ubuntu standalone, Raspberry Pi OS standalone, or Windows with Linux remote capture.")
+        warn("macOS is not an officially supported standalone or capture-appliance target.")
 
     info("Long-term limit: replay, payload decoding, and reconstruction remain heuristic and are not guaranteed.")
 

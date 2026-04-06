@@ -3,14 +3,18 @@
 Runs the supported Windows-to-remote capture flow.
 
 .DESCRIPTION
-This helper wraps `videopipeline.py start-remote` and can optionally install
-dependencies, bootstrap the remote appliance, and run doctor first.
+This helper wraps `videopipeline.py start-remote` and auto-installs the
+supported Windows dependencies when they are missing. It can also bootstrap
+the remote appliance and run doctor first.
 
 .EXAMPLE
 .\run_remote.ps1 -Host pi@raspberrypi -Interface wlan0 -DoctorFirst
 
 .EXAMPLE
-.\run_remote.ps1 -InstallDeps -Host pi@raspberrypi -Interface wlan0 -Bootstrap
+.\run_remote.ps1 -Host pi@raspberrypi -Interface wlan0 -Bootstrap
+
+.EXAMPLE
+.\run_remote.ps1 -SkipInstallDeps -Host pi@raspberrypi -Interface wlan0
 #>
 
 [CmdletBinding()]
@@ -29,7 +33,8 @@ param(
     [string]$Output = "",
     [switch]$Bootstrap,
     [switch]$DoctorFirst,
-    [switch]$InstallDeps
+    [switch]$InstallDeps,
+    [switch]$SkipInstallDeps
 )
 
 $ErrorActionPreference = "Stop"
@@ -38,7 +43,7 @@ Set-StrictMode -Version Latest
 $RepoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $RepoRoot "scripts\common.ps1")
 
-Ensure-RepoInstallDeps -RepoRoot $RepoRoot -InstallDeps:$InstallDeps
+Ensure-RepoInstallDeps -RepoRoot $RepoRoot -InstallDeps:$InstallDeps -SkipInstallDeps:$SkipInstallDeps
 
 if (-not $RemoteHost -and -not $Config) {
     Write-Host "No host was provided on the command line; saved config values will be used if available."

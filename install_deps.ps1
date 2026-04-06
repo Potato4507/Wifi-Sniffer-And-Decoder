@@ -9,24 +9,32 @@ param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
-Write-Host "Setting up Wifi-Sniffer-And-Decoder for the supported Windows controller workflow..."
+Write-Host "Setting up Wifi-Sniffer-And-Decoder for the official Windows remote-capture mode..."
 Write-Host ""
-Write-Host "Official support target:"
-Write-Host "  - Windows 10/11 as the controller and analysis machine"
-Write-Host "  - Raspberry Pi OS or Ubuntu as the remote capture device"
+Write-Host "Official product modes:"
+Write-Host "  - Ubuntu standalone"
+Write-Host "  - Raspberry Pi OS standalone"
+Write-Host "  - Windows 10/11 controller/analyzer + Ubuntu or Raspberry Pi OS remote capture"
 Write-Host ""
-Write-Host "This setup assumes:"
+Write-Host "This Windows installer prepares the third mode:"
 Write-Host "  - Native Windows Python"
 Write-Host "  - Wireshark/NPcap tools on PATH"
 Write-Host "  - FFmpeg/ffplay on PATH"
 Write-Host "  - OpenSSH client for remote capture control"
+Write-Host "  - Windows helper scripts for first-run setup, validation, and daily capture"
 Write-Host ""
 Write-Host "The Windows helper scripts resolve the repo root automatically, so you can run them from any PowerShell location."
 Write-Host ""
 Write-Host "Explicit limits:"
 Write-Host "  - This repo does not make Windows monitor mode adapter-independent"
-Write-Host "  - The supported production path is remote capture on Raspberry Pi OS or Ubuntu"
+Write-Host "  - Windows is not the standalone capture target; it relies on Ubuntu or Raspberry Pi OS for reliable Wi-Fi capture"
 Write-Host "  - Replay and decoding remain heuristic and are not guaranteed"
+Write-Host ""
+Write-Host "Fastest supported Windows path after install:"
+Write-Host "  .\setup_remote.ps1"
+Write-Host "  .\validate_remote.ps1 -Host pi@raspberrypi -Interface wlan0"
+Write-Host "  .\run_remote.ps1 -Host pi@raspberrypi -Interface wlan0 -DoctorFirst"
+Write-Host "  (These helper scripts auto-install missing supported dependencies by default.)"
 Write-Host ""
 
 function Install-WingetPackage {
@@ -178,37 +186,34 @@ foreach ($Tool in $ToolChecks) {
 
 Write-Host ""
 Write-Host "Next steps:"
-Write-Host ("  Preferred workflow:")
-Write-Host ("     Windows controller -> Raspberry Pi OS / Ubuntu capture device")
-Write-Host ("  1. Activate the virtual environment:")
-Write-Host ("     {0}" -f (Join-Path $VenvPath "Scripts\Activate.ps1"))
-Write-Host ("  2. Configure the pipeline:")
-Write-Host ("     python .\videopipeline.py config")
-Write-Host ("  3. Check the environment:")
+Write-Host ("  Official mode for this installer:")
+Write-Host ("     Windows controller/analyzer -> Ubuntu or Raspberry Pi OS capture device")
+Write-Host ("")
+Write-Host ("  Supported first-run flow:")
+Write-Host ("     1. Activate the virtual environment if you want the raw CLI:")
+Write-Host ("        {0}" -f (Join-Path $VenvPath "Scripts\Activate.ps1"))
+Write-Host ("     2. Run the Windows setup wizard:")
+Write-Host ("        .\setup_remote.ps1")
+Write-Host ("        .\setup_remote.ps1 -SmokeTest")
+Write-Host ("        .\setup_remote.ps1 -SkipInstallDeps   # if you want to skip the installer check")
+Write-Host ("     3. Validate the supported hardware path:")
+Write-Host ("        .\validate_remote.ps1 -Host pi@raspberrypi -Interface wlan0")
+Write-Host ("     4. Use the day-to-day capture helper:")
+Write-Host ("        .\run_remote.ps1 -Host pi@raspberrypi -Interface wlan0 -Duration 60 -DoctorFirst")
+Write-Host ("")
+Write-Host ("  Raw CLI equivalents for the same supported workflow:")
 Write-Host ("     python .\videopipeline.py deps")
-Write-Host ("  4. Pair a Raspberry Pi or Linux laptop for remote pulls:")
 Write-Host ("     python .\videopipeline.py pair-remote --host pi@raspberrypi")
-Write-Host ("  5. Bootstrap the remote capture helper:")
 Write-Host ("     python .\videopipeline.py bootstrap-remote --host pi@raspberrypi")
-Write-Host ("     (This also tries to install the no-prompt privileged capture runner on the remote side.)")
-Write-Host ("  6. Or use the Windows first-run wizard:")
-Write-Host ("     .\setup_remote.ps1")
-Write-Host ("     .\setup_remote.ps1 -InstallDeps -SmokeTest")
-Write-Host ("  7. Run a remote capture end-to-end:")
-Write-Host ("     python .\videopipeline.py start-remote --host pi@raspberrypi --interface wlan0 --duration 60 --run all")
-Write-Host ("  8. Check the remote appliance service:")
-Write-Host ("     python .\videopipeline.py remote-service status --host pi@raspberrypi")
-Write-Host ("     (The managed service records state, completion markers, and SHA-256 metadata for remote captures.)")
-Write-Host ("  9. Diagnose the full setup:")
 Write-Host ("     python .\videopipeline.py doctor --host pi@raspberrypi --interface wlan0")
-Write-Host ("  10. Run the supported hardware validation:")
-Write-Host ("     .\validate_remote.ps1 -Host pi@raspberrypi -Interface wlan0")
-Write-Host ("  11. Use the Windows shortcut helper:")
-Write-Host ("     .\run_remote.ps1 -Host pi@raspberrypi -Interface wlan0 -Duration 60")
-Write-Host ("  12. Run local checks:")
+Write-Host ("     python .\videopipeline.py start-remote --host pi@raspberrypi --interface wlan0 --duration 60 --run all")
+Write-Host ("     python .\videopipeline.py remote-service status --host pi@raspberrypi")
+Write-Host ("")
+Write-Host ("  Local project checks:")
 Write-Host ("     .\scripts\check.ps1")
-Write-Host ("  13. Experimental local-only paths:")
+Write-Host ("")
+Write-Host ("  Experimental Windows-only local paths:")
 Write-Host ("     python .\videopipeline.py capture")
 Write-Host ("     python .\videopipeline.py extract --pcap .\pipeline_output\raw_capture.pcapng")
 Write-Host ("     python .\videopipeline.py all")
-Write-Host ("     (Use these for experimentation, not as the primary supported product path.)")
+Write-Host ("     (Keep these for experimentation; they are not the official Windows product mode.)")

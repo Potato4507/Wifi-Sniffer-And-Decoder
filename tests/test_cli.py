@@ -138,6 +138,17 @@ def test_build_parser_parses_validate_remote_arguments() -> None:
     assert args.skip_smoke is True
 
 
+def test_build_parser_parses_validate_local_arguments() -> None:
+    parser = cli.build_parser()
+
+    args = parser.parse_args(["validate-local", "--interface", "wlan0", "--duration", "12", "--skip-smoke"])
+
+    assert args.command == "validate-local"
+    assert args.interface == "wlan0"
+    assert args.duration == 12
+    assert args.skip_smoke is True
+
+
 def test_run_play_prefers_offline_reconstruction(monkeypatch) -> None:
     report = {
         "candidate_material": {"mode": "static_xor_candidate", "key_hex": "01"},
@@ -333,3 +344,49 @@ def test_run_validate_remote_skip_smoke_can_still_pass(monkeypatch, tmp_path) ->
     )
 
     assert result is True
+
+
+def test_run_validate_local_writes_report(monkeypatch, tmp_path) -> None:
+    capture_path = tmp_path / "capture.pcapng"
+    capture_path.write_bytes(b"pcap")
+    report_path = tmp_path / "standalone-validation.json"
+
+    monkeypatch.setattr(cli, "check_environment", lambda: True)
+    monkeypatch.setattr(cli, "list_interfaces", lambda: [("1", "wlan0", "wireless")])
+    monkeypatch.setattr(cli, "run_capture", lambda config, strip_wifi=False: str(capture_path))
+    monkeypatch.setattr(cli, "run_extract", lambda config, pcap: {"streams": 1})
+    monkeypatch.setattr(cli, "run_detect", lambda config, manifest_path=None: {"selected_candidate_stream": {"stream_id": "s1"}})
+    monkeypatch.setattr(cli, "run_analyze", lambda config, decrypted_dir=None: {"candidate_material": {"mode": "static_xor_candidate"}})
+
+    result = cli.run_validate_local(
+        {"output_dir": str(tmp_path), "interface": "wlan0", "capture_duration": 20},
+        interface="wlan0",
+        duration=12,
+        report_path=str(report_path),
+    )
+
+    assert result is True
+    data = __import__("json").loads(report_path.read_text(encoding="utf-8"))
+    assert data["overall_ok"] is True
+    assert data["smoke_capture"]["success"] is True
+    assert data["processing_smoke"]["success"] is True
+    assert data["interface_check"]["present"] is True
+
+
+def test_run_validate_local_skip_smoke_can_still_pass(monkeypatch, tmp_path) -> None:
+    report_path = tmp_path / "standalone-validation.json"
+
+    monkeypatch.setattr(cli, "check_environment", lambda: True)
+    monkeypatch.setattr(cli, "list_interfaces", lambda: [("1", "wlan0", "wireless")])
+
+    result = cli.run_validate_local(
+        {"output_dir": str(tmp_path), "interface": "wlan0"},
+        interface="wlan0",
+        report_path=str(report_path),
+        skip_smoke=True,
+    )
+
+    assert result is True
+    data = __import__("json").loads(report_path.read_text(encoding="utf-8"))
+    assert data["overall_ok"] is True
+    assert data["smoke_capture"]["requested"] is False

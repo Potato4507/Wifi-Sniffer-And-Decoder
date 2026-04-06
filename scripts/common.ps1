@@ -1,5 +1,19 @@
 Set-StrictMode -Version Latest
 
+function Test-AnyCommandAvailable {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$Names
+    )
+
+    foreach ($Name in $Names) {
+        if (Get-Command $Name -ErrorAction SilentlyContinue) {
+            return $true
+        }
+    }
+    return $false
+}
+
 function Format-DisplayArgument {
     param(
         [Parameter(Mandatory = $true)]
@@ -44,11 +58,32 @@ function Ensure-RepoInstallDeps {
     param(
         [Parameter(Mandatory = $true)]
         [string]$RepoRoot,
-        [switch]$InstallDeps
+        [switch]$InstallDeps,
+        [switch]$SkipInstallDeps
     )
 
+    if ($SkipInstallDeps) {
+        return
+    }
+
     $venvPython = Join-Path $RepoRoot ".venv\Scripts\python.exe"
-    if (-not $InstallDeps -and (Test-Path $venvPython)) {
+    $installNeeded = $InstallDeps -or -not (Test-Path $venvPython)
+    if (-not $installNeeded) {
+        $requiredToolSets = @(
+            @("dumpcap", "dumpcap.exe"),
+            @("tshark", "tshark.exe"),
+            @("ssh", "ssh.exe"),
+            @("scp", "scp.exe")
+        )
+        foreach ($toolSet in $requiredToolSets) {
+            if (-not (Test-AnyCommandAvailable -Names $toolSet)) {
+                $installNeeded = $true
+                break
+            }
+        }
+    }
+
+    if (-not $installNeeded) {
         return
     }
 
@@ -58,6 +93,7 @@ function Ensure-RepoInstallDeps {
     }
 
     Write-Host ""
+    Write-Host "Checking/installing Windows dependencies for the supported workflow..."
     Write-Host ("> powershell -NoProfile -ExecutionPolicy Bypass -File {0}" -f $installScript)
     & powershell -NoProfile -ExecutionPolicy Bypass -File $installScript
     if ($LASTEXITCODE -ne 0) {

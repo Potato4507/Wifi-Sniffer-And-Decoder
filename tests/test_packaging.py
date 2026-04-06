@@ -35,7 +35,13 @@ def test_build_release_script_creates_portable_zip(tmp_path) -> None:
     assert __version__ in zip_path.name
     with zipfile.ZipFile(zip_path) as archive:
         members = set(archive.namelist())
+    assert "CHANGELOG.md" in members
+    assert "RELEASE_CHECKLIST.md" in members
     assert "README.md" in members
     assert "videopipeline.py" in members
+    assert "run_local.sh" in members
+    assert "setup_local.sh" in members
+    assert "validate_local.sh" in members
+    assert "scripts/common.sh" in members
     assert "scripts/common.ps1" in members
     assert "wifi_pipeline/cli.py" in members

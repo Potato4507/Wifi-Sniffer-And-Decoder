@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # WiFi Stream Pipeline dependency installer.
-# Primary use: prepare a Raspberry Pi OS or Ubuntu capture device.
-# Also usable for development on Linux/macOS.
+# Primary use: prepare Ubuntu or Raspberry Pi OS for standalone use.
+# Also usable to prepare a Linux box for Windows remote-capture workflows.
 #
 # Usage:
 #   chmod +x install_deps.sh
@@ -9,6 +9,7 @@
 #   ./install_deps.sh --no-system  # Skip system packages
 #   ./install_deps.sh --skip-ssh   # Do not create an SSH key
 #   ./install_deps.sh --full       # Same as default (kept for compatibility)
+#   ./install_deps.sh --help       # Show options
 
 set -euo pipefail
 
@@ -31,16 +32,35 @@ have_cmd() {
     command -v "$1" >/dev/null 2>&1
 }
 
+usage() {
+    cat <<'EOF'
+Usage: ./install_deps.sh [--no-system] [--skip-ssh] [--full] [--help]
+
+Options:
+  --no-system  Skip apt/Homebrew package installation
+  --skip-ssh   Skip SSH key generation for remote capture pairing
+  --full       Keep compatibility with older docs; same as the default behavior
+  --help       Show this message
+
+Notes:
+  - The helper scripts auto-install missing supported dependencies by default.
+  - Use ./setup_local.sh, ./run_local.sh, or ./validate_local.sh for the
+    Linux-first supported path after this installer completes.
+EOF
+}
+
 for arg in "$@"; do
     case "$arg" in
         --full) FULL=1 ;;
         --no-system) FULL=0 ;;
         --skip-ssh) SETUP_SSH=0 ;;
+        --help|-h) usage; exit 0 ;;
         *) die "Unknown argument: $arg" ;;
     esac
 done
 
 OS=""
+LINUX_TARGET="best-effort-linux"
 if [[ "$(uname -s)" == "Darwin" ]]; then
     OS="macos"
 elif [[ -f /etc/os-release ]]; then
@@ -50,16 +70,52 @@ else
 fi
 
 log "[*] Detected platform: $OS"
-log "[*] Supported product path: Windows controller + Raspberry Pi OS/Ubuntu capture device"
+log "[*] Official product modes:"
+log "    - Ubuntu standalone"
+log "    - Raspberry Pi OS standalone"
+log "    - Windows 10/11 controller/analyzer + Ubuntu or Raspberry Pi OS remote capture"
 log "[*] Explicit limits:"
 log "    - This project does not make Windows monitor mode adapter-independent"
-log "    - Supported remote appliance targets are Raspberry Pi OS and Ubuntu"
+log "    - Only Ubuntu and Raspberry Pi OS are officially supported Linux targets"
 log "    - Replay and payload reconstruction remain heuristic"
+
+if [[ "$OS" == "linux" && -f /etc/os-release ]]; then
+    # We keep the supported Linux story intentionally narrow so standalone mode
+    # feels reliable instead of vaguely portable.
+    . /etc/os-release
+    case "${ID:-}" in
+        ubuntu)
+            LINUX_TARGET="ubuntu"
+            ;;
+        raspbian)
+            LINUX_TARGET="raspberry-pi-os"
+            ;;
+        debian)
+            if [[ "${NAME:-}" == *"Raspberry Pi"* ]]; then
+                LINUX_TARGET="raspberry-pi-os"
+            fi
+            ;;
+    esac
+fi
+
+if [[ "$OS" == "linux" ]]; then
+    case "$LINUX_TARGET" in
+        ubuntu)
+            log "[*] Installer profile: Ubuntu standalone (official)"
+            ;;
+        raspberry-pi-os)
+            log "[*] Installer profile: Raspberry Pi OS standalone (official)"
+            ;;
+        *)
+            log "[!] Installer profile: other Linux distro (best effort only)"
+            ;;
+    esac
+fi
 
 if [[ "$FULL" -eq 1 ]]; then
     if [[ "$OS" == "linux" ]]; then
         if ! have_cmd apt-get; then
-            log "[!] Automatic system package installation currently targets apt-based Raspberry Pi OS/Ubuntu systems."
+            log "[!] Automatic system package installation currently targets apt-based Ubuntu and Raspberry Pi OS systems."
             log "[!] Skipping system package installation on this distro."
         else
             log "[*] Installing system packages via apt ..."
@@ -129,29 +185,50 @@ log ""
 log "[+] Done. Activate the venv with:"
 log "      source .venv/bin/activate"
 log ""
-log "    Then run:"
-log "      (Primary role for Linux: remote capture device)"
-log "      python3 videopipeline.py config"
-log "      python3 videopipeline.py deps"
-log "      python3 videopipeline.py pair-remote --host pi@raspberrypi"
-log "      python3 videopipeline.py bootstrap-remote --host pi@raspberrypi"
-log "      # bootstrap-remote also tries to configure the no-prompt privileged capture runner"
-log "      python3 videopipeline.py start-remote --host pi@raspberrypi --interface wlan0 --duration 60 --run all"
-log "      python3 videopipeline.py remote-service status --host pi@raspberrypi"
-log "      # the managed service tracks completion markers and SHA-256 metadata for pulls"
-log "      python3 videopipeline.py doctor --host pi@raspberrypi --interface wlan0"
+if [[ "$OS" == "linux" ]]; then
+log "    Standalone next steps on this Linux machine:"
+log "      ./setup_local.sh"
+log "      ./validate_local.sh --interface wlan0"
+log "      ./run_local.sh"
+log "      python3 videopipeline.py web"
 log "      bash ./scripts/check.sh"
-log "      python3 videopipeline.py"
+    log "    (The helper scripts auto-install missing supported dependencies by default.)"
+    log ""
+    log "    Raw CLI equivalents:"
+    log "      python3 videopipeline.py deps"
+    log "      python3 videopipeline.py config"
+    log "      python3 videopipeline.py validate-local --interface wlan0"
+    log "      python3 videopipeline.py all"
+    log "      python3 videopipeline.py"
+    log ""
+    log "    Optional Wi-Fi lab steps if your adapter supports monitor mode:"
+    log "      sudo python3 videopipeline.py monitor"
+    log "      sudo python3 videopipeline.py wifi"
+    log ""
+    log "    If this Linux box will serve as a Windows capture appliance:"
+    log "      install here with ./install_deps.sh"
+    log "      then go back to the Windows controller and run:"
+    log "      .\\setup_remote.ps1"
+    log "      .\\validate_remote.ps1 -Host pi@raspberrypi -Interface wlan0"
+    log "      .\\run_remote.ps1 -Host pi@raspberrypi -Interface wlan0 -DoctorFirst"
+else
+    log "    Experimental macOS next steps:"
+    log "      python3 videopipeline.py deps"
+    log "      python3 videopipeline.py config"
+    log "      python3 videopipeline.py extract --pcap /path/to/input.pcapng"
+    log "      python3 videopipeline.py analyze"
+    log "      bash ./scripts/check.sh"
+fi
 
 if [[ "$OS" == "linux" ]]; then
     log ""
     log "    Monitor mode and capture require root:"
     log "      sudo python3 videopipeline.py monitor"
     log "      sudo python3 videopipeline.py wifi"
-    log "    Other Linux distributions may work, but Raspberry Pi OS and Ubuntu are the supported appliance targets."
+    log "    Other Linux distributions may work, but Ubuntu and Raspberry Pi OS are the only officially supported Linux standalone targets."
 elif [[ "$OS" == "macos" ]]; then
     log ""
     log "    Monitor mode (tcpdump -I) requires root:"
     log "      sudo python3 videopipeline.py monitor --method tcpdump"
-    log "    macOS is a development/experimental path, not a supported capture appliance target."
+    log "    macOS is a development/experimental path, not an officially supported target."
 fi

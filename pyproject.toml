@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "wifi-sniffer-and-decoder"
 dynamic = ["version"]
-description = "Windows-first stream analysis with a Linux capture appliance."
+description = "Wi-Fi capture and analysis with supported Ubuntu/Pi standalone and Windows remote workflows."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -45,6 +45,7 @@ videopipeline = "wifi_pipeline.cli:main"
 Homepage = "https://github.com/Dman0627/Wifi-Sniffer-And-Decoder"
 Issues = "https://github.com/Dman0627/Wifi-Sniffer-And-Decoder/issues"
 CI = "https://github.com/Dman0627/Wifi-Sniffer-And-Decoder/actions/workflows/ci.yml"
+Changelog = "https://github.com/Dman0627/Wifi-Sniffer-And-Decoder/blob/main/CHANGELOG.md"
 
 [tool.setuptools.dynamic]
 version = { attr = "wifi_pipeline.__version__" }

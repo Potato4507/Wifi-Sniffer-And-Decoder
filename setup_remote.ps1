@@ -3,14 +3,17 @@
 Runs the first-run setup flow for the supported remote capture path.
 
 .DESCRIPTION
-This helper wraps `videopipeline.py setup-remote` and can optionally run the
-Windows dependency installer before launching the guided setup flow.
+This helper wraps `videopipeline.py setup-remote` and auto-installs the
+supported Windows dependencies when they are missing.
 
 .EXAMPLE
-.\setup_remote.ps1 -InstallDeps
+.\setup_remote.ps1
 
 .EXAMPLE
 .\setup_remote.ps1 -Host pi@raspberrypi -Interface wlan0 -SmokeTest
+
+.EXAMPLE
+.\setup_remote.ps1 -SkipInstallDeps -Host pi@raspberrypi -Interface wlan0
 #>
 
 [CmdletBinding()]
@@ -26,7 +29,8 @@ param(
     [int]$Port = 22,
     [string]$Dest = "",
     [switch]$SmokeTest,
-    [switch]$InstallDeps
+    [switch]$InstallDeps,
+    [switch]$SkipInstallDeps
 )
 
 $ErrorActionPreference = "Stop"
@@ -35,7 +39,7 @@ Set-StrictMode -Version Latest
 $RepoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $RepoRoot "scripts\common.ps1")
 
-Ensure-RepoInstallDeps -RepoRoot $RepoRoot -InstallDeps:$InstallDeps
+Ensure-RepoInstallDeps -RepoRoot $RepoRoot -InstallDeps:$InstallDeps -SkipInstallDeps:$SkipInstallDeps
 
 $argsList = [System.Collections.Generic.List[string]]::new()
 $argsList.Add("setup-remote")

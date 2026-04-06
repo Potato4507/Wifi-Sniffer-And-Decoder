@@ -2,9 +2,9 @@
 
 [![CI](https://github.com/Dman0627/Wifi-Sniffer-And-Decoder/actions/workflows/ci.yml/badge.svg)](https://github.com/Dman0627/Wifi-Sniffer-And-Decoder/actions/workflows/ci.yml)
 ![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)
-![Supported path](https://img.shields.io/badge/supported-windows%20%2B%20pi%2Fubuntu-2d7d46.svg)
+![Supported modes](https://img.shields.io/badge/supported-ubuntu%20%7C%20pi%20standalone%20%7C%20windows%20remote-2d7d46.svg)
 
-Windows-first stream analysis with a Linux capture appliance. The supported product path is: run the controller and analysis on Windows, and capture packets on Raspberry Pi OS or Ubuntu over SSH.
+Wi-Fi capture and analysis with a narrow, honest support matrix. The official product modes are Ubuntu standalone, Raspberry Pi OS standalone, and Windows 10/11 paired with Ubuntu or Raspberry Pi OS for remote capture.
 
 ## What it does
 
@@ -16,91 +16,145 @@ Windows-first stream analysis with a Linux capture appliance. The supported prod
 
 ## Supported target
 
-This project now treats one workflow as the official supported path:
+This project now treats three modes as the official product surface:
 
-- `Windows 10/11` as the controller, launcher, and analysis machine
-- `Raspberry Pi OS` or `Ubuntu` as the remote capture device
-- `SSH` as the control plane between them
+- `Ubuntu standalone`
+- `Raspberry Pi OS standalone`
+- `Windows 10/11 controller/analyzer + Ubuntu or Raspberry Pi OS remote capture`
 
 Supported matrix:
 
 | Role | Officially supported | Notes |
 |---|---|---|
-| Windows controller/analyzer | Yes | Primary day to day workflow |
-| Raspberry Pi OS remote capture | Yes | Preferred capture appliance target |
-| Ubuntu remote capture | Yes | Secondary supported capture target |
-| Native Linux local analysis | Partial | Useful for development and advanced users |
-| macOS local analysis/capture | Experimental | Not a primary target |
+| Ubuntu standalone | Yes | Primary full local workflow on Linux |
+| Raspberry Pi OS standalone | Yes | Preferred compact/appliance Linux workflow |
+| Windows controller/analyzer + Ubuntu remote capture | Yes | Supported Windows path |
+| Windows controller/analyzer + Raspberry Pi OS remote capture | Yes | Preferred Windows path |
+| Other Linux distros | Best effort | May work, but not an official target |
+| macOS local analysis/capture | Experimental | Not an official target |
 | Native Windows monitor-mode Wi-Fi capture | Experimental | Driver and adapter dependent |
 
 What this means in practice:
 
-- If you want the most reliable experience, use `pair-remote`, `bootstrap-remote`, `doctor`, and `start-remote`
-- Local Windows capture still exists, but it is no longer the primary product path
+- If you want standalone capture plus analysis on one machine, use `Ubuntu` or `Raspberry Pi OS`
+- If you want to stay on Windows, use `pair-remote`, `bootstrap-remote`, `doctor`, and `start-remote`
+- Local Windows capture still exists, but it is no longer an official product mode
 - Windows monitor-mode and Wi-Fi lab helpers are best-effort, not the main promise of the repo
 
 ## Start here
 
-If you just want the supported path with the least friction, use this sequence from Windows:
+Use the installer that matches the machine you are sitting at:
+
+| You are on | Official mode | Start with |
+|---|---|---|
+| Windows 10/11 | Controller/analyzer paired with Ubuntu or Raspberry Pi OS | `.\setup_remote.ps1` |
+| Ubuntu | Standalone local capture + analysis | `./install_deps.sh` |
+| Raspberry Pi OS | Standalone local capture + analysis, or remote capture appliance | `./install_deps.sh` |
+| Other Linux distros | Best effort only | `./install_deps.sh` |
+| macOS | Experimental only | `./install_deps.sh` |
+
+`Windows 10/11 -> Ubuntu or Raspberry Pi OS remote capture`
 
 ```powershell
-.\setup_remote.ps1 -InstallDeps
+.\setup_remote.ps1
 .\validate_remote.ps1 -Host pi@raspberrypi -Interface wlan0
 .\run_remote.ps1 -Host pi@raspberrypi -Interface wlan0 -DoctorFirst
 ```
 
-That gives you:
+That is the supported Windows onboarding path. It installs local dependencies, pairs SSH, bootstraps the Linux capture device, writes a validation report, and leaves you with a repeatable daily-use command.
 
-- local dependency install
-- SSH pairing and remote bootstrap
-- a validation report
-- a repeatable day-to-day capture command
+`Ubuntu or Raspberry Pi OS standalone`
+
+```bash
+./setup_local.sh
+./validate_local.sh --interface wlan0
+./run_local.sh
+```
+
+That is the supported Linux standalone path. `./setup_local.sh` wraps first-run config, `./validate_local.sh` writes a standalone validation report, and `./run_local.sh` is the day-to-day local workflow. All of the helper scripts auto-install missing supported dependencies by default.
+
+Helper defaults:
+
+- Supported helper scripts auto-install missing supported dependencies by default
+- Use `-SkipInstallDeps` on the PowerShell helpers if you want to skip that check
+- Use `--no-install-deps` on the shell helpers if you want to skip that check
+- `.\scripts\check.ps1` and `bash ./scripts/check.sh` auto-install missing Python test dependencies
+
+If your adapter supports monitor mode and the Wi-Fi lab workflow, add:
+
+```bash
+sudo python3 videopipeline.py monitor
+sudo python3 videopipeline.py wifi
+```
 
 ## Quickstart
 
 ### Windows
 
 ```powershell
+.\setup_remote.ps1
+.\validate_remote.ps1 -Host pi@raspberrypi -Interface wlan0
+.\run_remote.ps1 -Host pi@raspberrypi -Interface wlan0 -DoctorFirst
+```
+
+Windows is an official controller/analyzer target only when paired with Ubuntu or Raspberry Pi OS over SSH. `.\setup_remote.ps1` wraps the Windows-first flow: local install, guided remote setup, and saved config.
+
+If you prefer the raw installer/CLI route, the equivalent sequence is:
+
+```powershell
 .\install_deps.ps1
 .\.venv\Scripts\Activate.ps1
-python .\videopipeline.py deps
-python .\videopipeline.py config
-python .\videopipeline.py
-```
-
-Windows is the primary controller/analyzer target. The installer will attempt to install Wireshark, Npcap, FFmpeg, and OpenSSH. Use `-SkipSystemPackages`, `-SkipWifiTools`, or `-SkipSshSetup` to opt out.
-
-For the supported workflow, use Windows to control a remote Raspberry Pi OS or Ubuntu capture device instead of relying on native Windows monitor mode.
-
-For the easiest first run on Windows, use the setup wizard:
-
-```powershell
-.\setup_remote.ps1 -InstallDeps
-```
-
-To validate a real supported setup after pairing/bootstrap, use:
-
-```powershell
+python .\videopipeline.py pair-remote --host pi@raspberrypi
+python .\videopipeline.py bootstrap-remote --host pi@raspberrypi
 .\validate_remote.ps1 -Host pi@raspberrypi -Interface wlan0
+.\run_remote.ps1 -Host pi@raspberrypi -Interface wlan0 -DoctorFirst
 ```
+
+Use `-SkipSystemPackages`, `-SkipWifiTools`, or `-SkipSshSetup` to opt out of parts of the Windows installer. Native Windows monitor-mode capture remains experimental.
 
 ### Linux or Raspberry Pi
 
 ```bash
 chmod +x install_deps.sh
-./install_deps.sh
-python3 videopipeline.py deps
-python3 videopipeline.py config
-python3 videopipeline.py
+./setup_local.sh
+./validate_local.sh --interface wlan0
+./run_local.sh
 ```
 
-To skip system package installation:
+Ubuntu and Raspberry Pi OS are the official Linux standalone targets. This is the path to use when you want one machine to capture and analyze locally.
+
+If you prefer the raw installer/CLI route, the equivalent sequence is:
+
+```bash
+./install_deps.sh
+source .venv/bin/activate
+python3 videopipeline.py deps
+python3 videopipeline.py config
+python3 videopipeline.py validate-local --interface wlan0
+python3 videopipeline.py all
+```
+
+If your adapter supports monitor mode and the Wi-Fi lab workflow:
+
+```bash
+sudo python3 videopipeline.py monitor
+sudo python3 videopipeline.py wifi
+```
+
+If this Linux machine will act as the capture appliance for a Windows controller, still install it locally here with `./install_deps.sh`, then return to Windows and run:
+
+```powershell
+.\setup_remote.ps1
+.\validate_remote.ps1 -Host pi@raspberrypi -Interface wlan0
+```
+
+To skip system package installation on Linux:
 
 ```bash
 ./install_deps.sh --no-system
 ```
 
-Linux is primarily the remote capture target. Raspberry Pi OS and Ubuntu are the supported remote appliance choices.
+Other Linux distros may work, but they are best effort only.
 
 ### macOS
 
@@ -111,13 +165,13 @@ python3 videopipeline.py config
 python3 videopipeline.py
 ```
 
-macOS remains available for development and experimentation, but it is not part of the primary supported capture workflow.
+macOS remains available for development and experimentation, but it is not an official supported target.
 
 ## Plug and play remote capture
 
-This is the primary supported workflow. Capture on a Raspberry Pi OS or Ubuntu device, then pull the file to Windows automatically and run the pipeline.
+This section is for the official Windows workflow. Capture on a Raspberry Pi OS or Ubuntu device, then pull the file to Windows automatically and run the pipeline there.
 
-Bootstrap the remote device first:
+Bootstrap the remote device from Windows first:
 
 ```powershell
 python .\videopipeline.py bootstrap-remote --host pi@raspberrypi
@@ -136,13 +190,13 @@ That will:
 - try to install a constrained privileged runner at `/usr/local/bin/wifi-pipeline-capture-privileged`
 - try to add a matching sudoers rule so `start-remote` can capture without an interactive password prompt
 
-On the capture device:
+On the Linux capture device:
 
 ```bash
 wifi-pipeline-capture --interface wlan0 --duration 60
 ```
 
-On Windows:
+Back on Windows:
 
 ```powershell
 python .\videopipeline.py start-remote --host pi@raspberrypi --interface wlan0 --duration 60 --run all
@@ -157,7 +211,7 @@ Windows shortcut:
 First-run shortcut:
 
 ```powershell
-.\setup_remote.ps1 -InstallDeps
+.\setup_remote.ps1
 ```
 
 If your PowerShell execution policy blocks `.ps1` scripts, use:
@@ -207,6 +261,16 @@ All three Windows helper scripts resolve the repo root automatically, so you can
 | `.\validate_remote.ps1` | Supported-hardware validation and JSON report generation |
 | `.\run_remote.ps1` | Day-to-day remote capture and local processing |
 
+Linux helper scripts follow the same idea for the standalone path:
+
+| Script | Best use |
+|---|---|
+| `./setup_local.sh` | First-run Linux setup and optional standalone validation |
+| `./validate_local.sh` | Standalone validation report for Ubuntu/Raspberry Pi OS |
+| `./run_local.sh` | Day-to-day local capture and processing |
+
+These Linux helper scripts also resolve the repo root automatically, so you can launch them from outside the repository directory. Use `-SkipInstallDeps` on the PowerShell helpers or `--no-install-deps` on the shell helpers if you want to skip the automatic installer check.
+
 `validate_remote.ps1` is the Windows-first supported-hardware validation flow. It runs environment checks, doctor, captures a short smoke file by default, and writes a JSON report to `pipeline_output/validation_report.json`.
 
 ```powershell
@@ -224,7 +288,7 @@ python .\videopipeline.py doctor --host pi@raspberrypi --interface wlan0
 
 That checks local tools, SSH/SCP availability, remote reachability, whether `tcpdump` is present, whether the remote helper and service exist, whether the no-prompt privileged runner is ready, whether the state/capture directories are writable, and whether the latest service-generated capture has integrity metadata.
 
-For the supported path, you want doctor to show `Privilege mode: hardened`. If it falls back instead, re-run `bootstrap-remote` using a remote account that has `sudo` access.
+For the official Windows remote path, you want doctor to show `Privilege mode: hardened`. If it falls back instead, re-run `bootstrap-remote` using a remote account that has `sudo` access.
 
 To create a repeatable hardware-validation report:
 
@@ -233,6 +297,15 @@ python .\videopipeline.py validate-remote --host pi@raspberrypi --interface wlan
 ```
 
 That writes a report to `pipeline_output/validation_report.json` unless you override it with `--report`.
+
+For the official Linux standalone path, use:
+
+```bash
+./validate_local.sh --interface wlan0
+python3 videopipeline.py validate-local --interface wlan0
+```
+
+That writes a standalone validation report to `pipeline_output/standalone_validation_report.json` unless you override it with `--report`.
 
 ## Secure connection setup
 
@@ -297,6 +370,7 @@ bash ./scripts/check.sh
 ```
 
 Both check scripts resolve the repo root automatically, so they work even if your shell is not already sitting in the repository root.
+They also auto-install missing Python test dependencies from `requirements.txt` and `requirements-dev.txt`.
 
 ## Packaging and release
 
@@ -320,6 +394,14 @@ GitHub also has a release workflow now:
 - pushes on tags like `v3.0.0` build a wheel, source distribution, and portable zip
 - manual runs via GitHub Actions also build the same artifacts
 - the workflow uploads artifacts to GitHub Releases for tagged builds
+- `CHANGELOG.md` now captures the narrowed support matrix and release story for `3.0.0`
+- `RELEASE_CHECKLIST.md` captures the simulated-vs-hardware validation gate for the supported matrix
+
+Recommended release gate before calling the supported matrix done:
+
+- `./validate_local.sh --interface wlan0` on Ubuntu
+- `./validate_local.sh --interface wlan0` on Raspberry Pi OS
+- `.\validate_remote.ps1 -Host pi@raspberrypi -Interface wlan0` on Windows with a Linux capture device
 
 ## Unsupported paths and long-term limits
 
@@ -329,7 +411,7 @@ These are intentional boundaries of the project as it stands today:
 |---|---|---|
 | Native Windows monitor-mode capture as the primary workflow | Unsupported as the main product path | It may work on some adapters, but it is not the reliability target for this repo |
 | Adapter-independent Windows 802.11 parity with Linux | Not achievable here | Driver and hardware limits cannot be removed in software |
-| Remote capture on arbitrary Linux distributions | Best effort only | The supported appliance targets are Raspberry Pi OS and Ubuntu |
+| Other Linux distributions outside Ubuntu and Raspberry Pi OS | Best effort only | They may work, but they are not part of the official support matrix |
 | Remote capture on devices without a normal shell toolchain | Unsupported | The remote helper assumes SSH, bash, nohup, sudo/capabilities, and standard filesystem tools |
 | Guaranteed WPA cracking, payload decoding, or replay | Unsupported | Analysis and replay are heuristic and may require manual tuning in `lab.json` |
 
@@ -340,11 +422,11 @@ Long-term limits that still apply even on the supported path:
 - Some Wi-Fi lab helpers remain toolchain dependent and are more fragile than the pcap-first remote workflow
 - Unknown or encrypted payloads may still produce false positives, partial reconstruction, or no usable replay at all
 
-If you want the most reliable experience, stay on the supported product path:
+If you want the most reliable experience, stay on one of the official product modes:
 
-- `Windows 10/11` for control, import, analysis, and replay
-- `Raspberry Pi OS` or `Ubuntu` for remote capture
-- `pair-remote -> bootstrap-remote -> doctor -> start-remote`
+- `Ubuntu standalone`
+- `Raspberry Pi OS standalone`
+- `Windows 10/11 + Ubuntu/Raspberry Pi OS remote capture`
 
 ## Troubleshooting
 
@@ -364,17 +446,21 @@ If you want the most reliable experience, stay on the supported product path:
 | `python videopipeline.py deps` | Check tools and Python packages |
 | `python videopipeline.py pair-remote --host ...` | Install your SSH key on a remote capture device |
 | `python videopipeline.py bootstrap-remote --host ...` | Prepare a Pi/Linux capture device and install the helper script |
-| `python videopipeline.py setup-remote --host ... --interface wlan0` | Run the guided first-run setup flow and save the supported remote-capture config |
-| `python videopipeline.py start-remote --host ... --interface wlan0 --duration 60 --run all` | Run a timed remote capture through the managed remote service, pull it back, and process it |
-| `python videopipeline.py validate-remote --host ... --interface wlan0` | Run the supported smoke-validation flow and write a JSON validation report |
+| `python videopipeline.py setup-remote --host ... --interface wlan0` | Run the guided first-run setup flow and save the official Windows remote-capture config |
+| `python videopipeline.py start-remote --host ... --interface wlan0 --duration 60 --run all` | Run the official Windows remote-capture flow, pull it back, and process it |
+| `python videopipeline.py validate-remote --host ... --interface wlan0` | Run the official Windows remote-capture validation flow and write a JSON validation report |
+| `python videopipeline.py validate-local --interface wlan0` | Run the Linux standalone validation flow and write a JSON validation report |
 | `python videopipeline.py remote-service status --host ...` | Inspect the remote capture service state |
 | `python videopipeline.py remote-service start --host ... --interface wlan0 --duration 60` | Start a timed capture on the remote appliance without pulling it yet |
 | `python videopipeline.py remote-service last-capture --host ...` | Show the last completed capture path on the remote appliance |
 | `python videopipeline.py remote-service stop --host ...` | Stop the running remote capture service |
 | `python videopipeline.py doctor --host ... --interface wlan0` | Check local and remote capture readiness |
-| `.\setup_remote.ps1 -InstallDeps` | Windows first-run wizard for install, pairing, bootstrap, and doctor |
-| `.\validate_remote.ps1 -Host ... -Interface wlan0` | Windows supported-hardware validation helper |
+| `.\setup_remote.ps1` | Windows first-run wizard for install, pairing, bootstrap, and doctor |
+| `.\validate_remote.ps1 -Host ... -Interface wlan0` | Windows remote-capture validation helper |
 | `.\run_remote.ps1 -Host ... -Interface wlan0 -Duration 60` | Windows helper for bootstrap, doctor, and start-remote |
+| `./setup_local.sh` | Linux first-run helper for config and optional standalone validation |
+| `./validate_local.sh --interface wlan0` | Linux standalone validation helper |
+| `./run_local.sh` | Linux helper for local capture and processing |
 | `python videopipeline.py capture` | Capture to `pipeline_output/raw_capture.pcapng` |
 | `python videopipeline.py extract --pcap <file>` | Extract payload streams |
 | `python videopipeline.py detect` | Build detection report |
@@ -405,6 +491,6 @@ Full 802.11 monitor capture depends on the adapter and driver. Windows drivers a
 
 ## Notes
 
-- The core analysis pipeline is cross platform, but the product is optimized around `Windows + Raspberry Pi OS/Ubuntu`.
+- The core analysis pipeline is cross platform, but the official product modes are `Ubuntu standalone`, `Raspberry Pi OS standalone`, and `Windows + Ubuntu/Raspberry Pi OS remote capture`.
 - Wi-Fi lab helpers require external tools like `aircrack-ng` and remain more fragile than the remote pcap-first path.
 - Some reconstruction paths are heuristic and may require tuning in `lab.json`.

@@ -3,14 +3,18 @@
 Validates the supported Windows + remote capture workflow.
 
 .DESCRIPTION
-This helper wraps `videopipeline.py validate-remote` and can optionally run the
-dependency installer first. By default it performs a short smoke capture.
+This helper wraps `videopipeline.py validate-remote` and auto-installs the
+supported Windows dependencies when they are missing. By default it performs a
+short smoke capture.
 
 .EXAMPLE
 .\validate_remote.ps1 -Host pi@raspberrypi -Interface wlan0
 
 .EXAMPLE
-.\validate_remote.ps1 -InstallDeps -Host pi@raspberrypi -Interface wlan0 -SkipSmoke
+.\validate_remote.ps1 -Host pi@raspberrypi -Interface wlan0 -SkipSmoke
+
+.EXAMPLE
+.\validate_remote.ps1 -SkipInstallDeps -Host pi@raspberrypi -Interface wlan0
 #>
 
 [CmdletBinding()]
@@ -27,7 +31,8 @@ param(
     [string]$Dest = "",
     [string]$Report = "",
     [switch]$SkipSmoke,
-    [switch]$InstallDeps
+    [switch]$InstallDeps,
+    [switch]$SkipInstallDeps
 )
 
 $ErrorActionPreference = "Stop"
@@ -36,7 +41,7 @@ Set-StrictMode -Version Latest
 $RepoRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $RepoRoot "scripts\common.ps1")
 
-Ensure-RepoInstallDeps -RepoRoot $RepoRoot -InstallDeps:$InstallDeps
+Ensure-RepoInstallDeps -RepoRoot $RepoRoot -InstallDeps:$InstallDeps -SkipInstallDeps:$SkipInstallDeps
 
 $argsList = [System.Collections.Generic.List[string]]::new()
 $argsList.Add("validate-remote")

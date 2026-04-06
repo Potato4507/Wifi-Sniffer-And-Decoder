@@ -5,10 +5,11 @@ import os
 import sys
 from typing import Dict, Optional
 
-from .environment import IS_MACOS, IS_WINDOWS, pick_interface
+from .environment import IS_MACOS, IS_WINDOWS, default_product_mode, pick_interface, resolve_product_profile
 from .ui import ask, ask_int, confirm, ok, section, warn
 
 DEFAULT_CONFIG = {
+    "product_mode": default_product_mode(),
     # ── environment ───────────────────────────────────────────────────────────
     "environment_model": (
         "native_windows" if sys.platform.startswith("win")
@@ -82,6 +83,11 @@ def load_config(path: Optional[str] = None) -> Dict[str, object]:
 
     # Back-fill any keys that may be absent in older lab.json files
     config.setdefault("wpa_password_env", "WIFI_PIPELINE_WPA_PASSWORD")
+    requested_mode = str(config.get("product_mode") or "").strip()
+    resolved_profile = resolve_product_profile(config)
+    if requested_mode and requested_mode != resolved_profile.key:
+        warn(f"Overriding product_mode with {resolved_profile.key} on this platform.")
+    config["product_mode"] = resolved_profile.key
     config.setdefault("wpa_password", "")
     config.setdefault("wordlist_path", "/usr/share/wordlists/rockyou.txt")
     config.setdefault("handshake_timeout", 120)
@@ -115,6 +121,9 @@ def resolve_wpa_password(config: Dict[str, object]) -> str:
 
 def interactive_config(config: Dict[str, object]) -> Dict[str, object]:
     section("Configuration")
+    profile = resolve_product_profile(config)
+    ok(f"Active product mode: {profile.label}")
+    warn(profile.description)
 
     # ── interface ────────────────────────────────────────────────────────────
     if confirm("Pick the capture interface from a discovered list?", default=True):
@@ -235,7 +244,8 @@ def interactive_config(config: Dict[str, object]) -> Dict[str, object]:
         config["wpa_password"] = ask("WPA password", secret=True)
 
     section("Remote Capture (optional)")
-    if confirm("Configure a remote capture source (SSH/SCP)?", default=False):
+    default_remote = profile.key == "windows_remote"
+    if confirm("Configure a remote capture source (SSH/SCP)?", default=default_remote):
         config["remote_host"] = ask(
             "Remote host (user@host)",
             str(config.get("remote_host") or ""),

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 from wifi_pipeline.config import load_config, resolve_wpa_password, save_config
 
@@ -34,6 +35,17 @@ def test_load_config_backfills_defaults(tmp_path) -> None:
     assert loaded["remote_host"] == "pi@host"
     assert loaded["remote_port"] == 22
     assert loaded["monitor_method"] == "airodump"
+    assert "product_mode" in loaded
+
+
+def test_load_config_normalizes_product_mode(monkeypatch, tmp_path) -> None:
+    config_path = tmp_path / "lab.json"
+    config_path.write_text(json.dumps({"product_mode": "unsupported_mode"}), encoding="utf-8")
+    monkeypatch.setattr("wifi_pipeline.config.resolve_product_profile", lambda config: SimpleNamespace(key="windows_remote"))
+
+    loaded = load_config(str(config_path))
+
+    assert loaded["product_mode"] == "windows_remote"
 
 
 def test_save_config_strips_wpa_password(tmp_path) -> None:

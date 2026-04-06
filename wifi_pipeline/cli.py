@@ -12,7 +12,16 @@ from .analysis import CryptoAnalyzer, FormatDetector, _load_manifest, _rank_cand
 from .capture import Capture
 from .config import interactive_config, load_config, resolve_wpa_password, save_config
 from .corpus import CorpusStore
-from .environment import IS_MACOS, IS_WINDOWS, check_environment
+from .environment import (
+    IS_LINUX,
+    IS_MACOS,
+    IS_WINDOWS,
+    SUPPORTED_PRODUCT_SUMMARY,
+    command_support,
+    list_interfaces,
+    resolve_product_profile,
+    check_environment,
+)
 from .extract import StreamExtractor
 from .playback import ExperimentalPlayback, infer_replay_hint, reconstruct_from_capture
 from .remote import (
@@ -55,6 +64,10 @@ def _validation_report_path(config: Dict[str, object]) -> Path:
     return Path(str(config.get("output_dir") or "./pipeline_output")).resolve() / "validation_report.json"
 
 
+def _standalone_validation_report_path(config: Dict[str, object]) -> Path:
+    return Path(str(config.get("output_dir") or "./pipeline_output")).resolve() / "standalone_validation_report.json"
+
+
 def _handshake_path(config: Dict[str, object]) -> Optional[Path]:
     out = Path(str(config.get("output_dir") or "./pipeline_output")).resolve()
     for name in ("airodump_hs-01.cap", "besside_handshakes.cap", "monitor_raw.pcap"):
@@ -95,11 +108,72 @@ def _status_label(condition: bool, when_true: str, when_false: str = "missing") 
     return f"{RED}{when_false}{RESET}"
 
 
+def _command_support_suffix(config: Dict[str, object], command: str, *, has_input_pcap: bool = False) -> str:
+    support = command_support(command, config, has_input_pcap=has_input_pcap)
+    if support.status == "experimental":
+        return " [experimental]"
+    if support.status == "best_effort":
+        return " [best effort]"
+    return ""
+
+
+def _enforce_command_support(config: Dict[str, object], command: str, *, has_input_pcap: bool = False) -> bool:
+    support = command_support(command, config, has_input_pcap=has_input_pcap)
+    if support.status == "official":
+        return True
+    if support.status == "best_effort":
+        warn(f"`{command}` is outside the official support matrix for {support.profile.label}. Continuing in best-effort mode.")
+        if support.message:
+            info(support.message)
+        return True
+    if support.status == "experimental":
+        warn(f"`{command}` uses an experimental path on this machine.")
+        if support.message:
+            info(support.message)
+        return True
+
+    err(f"`{command}` is not supported for {support.profile.label}.")
+    if support.message:
+        err(support.message)
+    return False
+
+
 def _candidate_rows(config: Dict[str, object]) -> list[Dict[str, object]]:
     manifest = _load_json(_manifest_path(config))
     if not manifest:
         return []
     return _rank_candidate_streams(manifest, config)
+
+
+def _recommended_next_command(config: Dict[str, object], has_candidate: bool = False) -> str:
+    profile = resolve_product_profile(config)
+    if profile.key == "windows_remote":
+        if not str(config.get("remote_host") or "").strip():
+            return r".\setup_remote.ps1 -InstallDeps"
+        return r".\run_remote.ps1 -Host <user@host> -Interface <wlan0> -DoctorFirst"
+    if profile.key in ("ubuntu_standalone", "pi_standalone"):
+        if not str(config.get("interface") or "").strip():
+            return "bash ./setup_local.sh --install-deps"
+        if has_candidate:
+            return "python3 videopipeline.py play"
+        return "bash ./run_local.sh"
+    if profile.key == "linux_best_effort":
+        return "bash ./run_local.sh"
+    return "python videopipeline.py deps"
+
+
+def _active_validation_command(config: Dict[str, object]) -> str:
+    profile = resolve_product_profile(config)
+    if profile.key in ("ubuntu_standalone", "pi_standalone", "linux_best_effort"):
+        return "validate-local"
+    return "validate-remote"
+
+
+def _active_validation_label(config: Dict[str, object]) -> str:
+    command = _active_validation_command(config)
+    if command == "validate-local":
+        return "Run standalone validation"
+    return "Run supported validation"
 
 
 def _run_after_pull(config: Dict[str, object], pcap_path: str, mode: str) -> None:
@@ -206,9 +280,9 @@ def run_setup_remote(
 ) -> bool:
     section("Windows Remote Setup")
     if IS_WINDOWS:
-        info("This guided setup is optimized for the supported Windows controller workflow.")
+        info("This guided setup is optimized for the official Windows remote-capture mode.")
     else:
-        warn("This guided setup is Windows-first, but it can still prepare the supported remote capture path.")
+        warn("This guided setup is Windows-first, but it can still prepare the official Windows remote-capture mode.")
 
     resolved_host = (host if host is not None else ask("Remote host (user@host)", str(config.get("remote_host") or "pi@raspberrypi"))).strip()
     if not resolved_host:
@@ -251,7 +325,7 @@ def run_setup_remote(
 
     save_target = config_path or "lab.json"
     save_config(config, save_target)
-    info("Running the supported first-run flow: pair -> bootstrap -> doctor.")
+    info("Running the official Windows first-run flow: pair -> bootstrap -> doctor.")
     if not run_pair_remote(config, host=resolved_host, port=resolved_port, identity=resolved_identity or None):
         return False
 
@@ -436,7 +510,7 @@ def run_validate_remote(
     validation: Dict[str, object] = {
         "schema_version": 1,
         "validated_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "supported_target": "Windows controller/analyzer + Raspberry Pi OS or Ubuntu capture device",
+        "supported_target": "Windows 10/11 controller/analyzer + Ubuntu or Raspberry Pi OS remote capture",
         "inputs": {
             "host": target_host or "",
             "port": int(port if port is not None else config.get("remote_port", 22) or 22),
@@ -545,6 +619,115 @@ def run_validate_remote(
     return overall_ok
 
 
+def run_validate_local(
+    config: Dict[str, object],
+    interface: Optional[str] = None,
+    duration: Optional[int] = None,
+    report_path: Optional[str] = None,
+    skip_smoke: bool = False,
+) -> bool:
+    section("Standalone Validation")
+    profile = resolve_product_profile(config)
+    target_interface = interface or str(config.get("interface") or "").strip()
+    target_duration = int(duration if duration is not None else min(max(int(config.get("capture_duration", 60) or 60), 10), 30))
+    report_file = Path(report_path).resolve() if report_path else _standalone_validation_report_path(config)
+    report_file.parent.mkdir(parents=True, exist_ok=True)
+
+    discovered = list_interfaces()
+    discovered_names = [name for _index, name, _desc in discovered]
+    interface_present = bool(target_interface and target_interface in discovered_names)
+    smoke_config = dict(config)
+    if target_interface:
+        smoke_config["interface"] = target_interface
+    smoke_config["capture_duration"] = target_duration
+
+    validation: Dict[str, object] = {
+        "schema_version": 1,
+        "validated_at_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "supported_target": profile.label,
+        "inputs": {
+            "interface": target_interface,
+            "duration": target_duration,
+            "skip_smoke": bool(skip_smoke),
+        },
+        "environment_ok": False,
+        "product_profile": {
+            "key": profile.key,
+            "label": profile.label,
+            "official": bool(profile.official),
+            "standalone": bool(profile.standalone),
+        },
+        "interface_check": {
+            "requested": target_interface,
+            "present": interface_present,
+            "discovered_count": len(discovered),
+            "discovered_names": discovered_names,
+        },
+        "smoke_capture": {
+            "requested": not skip_smoke,
+            "success": False,
+            "local_capture_path": "",
+            "size_bytes": 0,
+        },
+        "processing_smoke": {
+            "requested": not skip_smoke,
+            "success": False,
+            "manifest_path": str(_manifest_path(config)),
+            "detection_report_path": str(_detection_report_path(config)),
+            "analysis_report_path": str(_analysis_report_path(config)),
+        },
+        "overall_ok": False,
+    }
+
+    env_ok = check_environment()
+    validation["environment_ok"] = env_ok
+
+    if not target_interface:
+        warn("No local capture interface is configured for standalone validation.")
+    elif interface_present:
+        info(f"Validation interface: {target_interface}")
+    else:
+        warn(f"Configured interface `{target_interface}` was not found in the discovered interface list.")
+
+    smoke_ok = True
+    processing_ok = True
+    if not skip_smoke:
+        smoke_ok = False
+        processing_ok = False
+        capture_path = run_capture(smoke_config)
+        if capture_path:
+            capture_file = Path(str(capture_path)).resolve()
+            validation["smoke_capture"]["local_capture_path"] = str(capture_file)
+            if capture_file.exists():
+                validation["smoke_capture"]["size_bytes"] = capture_file.stat().st_size
+            smoke_ok = capture_file.exists() and capture_file.stat().st_size > 0
+            validation["smoke_capture"]["success"] = smoke_ok
+            if smoke_ok:
+                manifest = run_extract(smoke_config, str(capture_file))
+                detection = run_detect(smoke_config)
+                analysis = run_analyze(smoke_config, None)
+                processing_ok = bool(manifest) and bool(detection) and bool(analysis)
+                validation["processing_smoke"]["success"] = processing_ok
+            else:
+                warn("Standalone smoke capture did not produce a readable pcap.")
+        else:
+            warn("Standalone smoke capture did not return a capture path.")
+    else:
+        validation["smoke_capture"]["success"] = True
+        validation["processing_smoke"]["success"] = True
+
+    interface_ok = bool(target_interface) and interface_present
+    overall_ok = bool(env_ok and interface_ok and smoke_ok and processing_ok)
+    validation["overall_ok"] = overall_ok
+    report_file.write_text(json.dumps(validation, indent=2), encoding="utf-8")
+
+    if overall_ok:
+        done(f"Standalone validation passed. Report saved to {report_file}")
+    else:
+        warn(f"Standalone validation found issues. Report saved to {report_file}")
+    return overall_ok
+
+
 # ---------------------------------------------------------------------------
 # Dashboard
 # ---------------------------------------------------------------------------
@@ -567,9 +750,12 @@ def _print_dashboard(config: Dict[str, object]) -> None:
     magic = str(config.get("custom_magic_hex") or "").strip() or f"{DIM}(none){RESET}"
     preferred = str(config.get("preferred_stream_id") or "").strip() or f"{DIM}(auto-pick){RESET}"
     env_model = str(config.get("environment_model") or ("native_windows" if IS_WINDOWS else "macos" if IS_MACOS else "linux"))
+    profile = resolve_product_profile(config)
+    profile_status = "official" if profile.official else "non-official"
 
     print(f"  {BOLD}Saved Config{RESET}")
     print(f"    Platform         : {env_model}")
+    print(f"    Product Mode     : {profile.label} ({profile_status})")
     print(f"    Interface        : {interface}")
     print(f"    Target           : {config.get('protocol', 'udp')}/{config.get('video_port', 5004)}")
     print(f"    Output           : {config.get('output_dir', './pipeline_output')}")
@@ -630,6 +816,9 @@ def _print_dashboard(config: Dict[str, object]) -> None:
             )
         if corpus.get("reused_candidate_material"):
             print(f"    Corpus Reuse     : {GREEN}yes{RESET}")
+
+    print(f"\n  {BOLD}Recommended Next Step{RESET}")
+    print(f"    Command          : {_recommended_next_command(config, has_candidate=bool(candidate or analysis))}")
 
 
 # ---------------------------------------------------------------------------
@@ -906,16 +1095,17 @@ def interactive_menu(config: Dict[str, object]) -> int:
         _print_dashboard(config)
         report = _load_report(config)
         has_candidate = bool(report and report.get("candidate_material"))
+        profile = resolve_product_profile(config)
         options = [
             "Guided setup / configure device",                    # 0
-            "Windows remote setup wizard",                        # 1
-            "Capture traffic (dumpcap / tcpdump fallback)",       # 2
-            "Pair remote capture device (SSH key install)",       # 3
-            "Bootstrap remote capture device",                    # 4
-            "Start remote capture, pull, and process",            # 5
-            "Pull remote capture (SSH/SCP)",                      # 6
-            "Monitor mode capture (airodump/besside/tcpdump)",   # 7
-            "Crack WPA2 + decrypt pcap",                          # 8
+            "Windows remote setup wizard" + _command_support_suffix(config, "setup-remote"),                        # 1
+            "Capture traffic (dumpcap / tcpdump fallback)" + _command_support_suffix(config, "capture"),       # 2
+            "Pair remote capture device (SSH key install)" + _command_support_suffix(config, "pair-remote"),       # 3
+            "Bootstrap remote capture device" + _command_support_suffix(config, "bootstrap-remote"),                    # 4
+            "Start remote capture, pull, and process" + _command_support_suffix(config, "start-remote"),            # 5
+            "Pull remote capture (SSH/SCP)" + _command_support_suffix(config, "remote"),                      # 6
+            "Monitor mode capture (airodump/besside/tcpdump)" + _command_support_suffix(config, "monitor"),   # 7
+            "Crack WPA2 + decrypt pcap" + _command_support_suffix(config, "crack"),                          # 8
             "Strip Wi-Fi layer on an existing pcap",              # 9
             "Extract payload streams from a pcap",                # 10
             "Run payload detection",                              # 11
@@ -924,63 +1114,78 @@ def interactive_menu(config: Dict[str, object]) -> int:
             "Edit custom stream hints",                           # 14
             "Run cipher heuristics",                              # 15
             "Start experimental replay / reconstruction",         # 16
-            "Run full pipeline (dumpcap / tcpdump capture)",      # 17
-            "Run full Wi-Fi pipeline (monitor + crack + decrypt)",# 18
+            "Run full pipeline (dumpcap / tcpdump capture)" + _command_support_suffix(config, "all"),      # 17
+            "Run full Wi-Fi pipeline (monitor + crack + decrypt)" + _command_support_suffix(config, "wifi"),# 18
             "Show latest report summary",                         # 19
             "Show corpus archive",                                # 20
             "Launch web dashboard",                               # 21
-            "Run doctor",                                         # 22
-            "Run supported validation",                           # 23
+            "Run doctor" + _command_support_suffix(config, "doctor"),                                         # 22
+            _active_validation_label(config) + _command_support_suffix(config, _active_validation_command(config)),    # 23
             "Exit",                                               # 24
         ]
-        default = 1 if IS_WINDOWS and not str(config.get("remote_host") or "").strip() else (16 if has_candidate else (2 if IS_WINDOWS else 7))
+        if profile.key == "windows_remote" and not str(config.get("remote_host") or "").strip():
+            default = 1
+        elif has_candidate:
+            default = 16
+        elif profile.key in ("ubuntu_standalone", "pi_standalone", "linux_best_effort"):
+            default = 17
+        else:
+            default = 2 if IS_WINDOWS else 7
         selection = choose("Select an action", options, default=default)
 
         if selection == 0:
             config = interactive_config(config)
         elif selection == 1:
-            run_setup_remote(config)
+            if _enforce_command_support(config, "setup-remote"):
+                run_setup_remote(config)
         elif selection == 2:
-            strip_wifi = confirm("Run Wi-Fi layer strip after capture?", default=bool(resolve_wpa_password(config)))
-            run_capture(config, strip_wifi=strip_wifi)
+            if _enforce_command_support(config, "capture"):
+                strip_wifi = confirm("Run Wi-Fi layer strip after capture?", default=bool(resolve_wpa_password(config)))
+                run_capture(config, strip_wifi=strip_wifi)
         elif selection == 3:
-            host = ask("Remote host (user@host)", str(config.get("remote_host") or ""))
-            identity = ask("SSH identity file (blank = auto)", str(config.get("remote_identity") or "")).strip() or None
-            run_pair_remote(config, host=host, identity=identity)
+            if _enforce_command_support(config, "pair-remote"):
+                host = ask("Remote host (user@host)", str(config.get("remote_host") or ""))
+                identity = ask("SSH identity file (blank = auto)", str(config.get("remote_identity") or "")).strip() or None
+                run_pair_remote(config, host=host, identity=identity)
         elif selection == 4:
-            host = ask("Remote host (user@host)", str(config.get("remote_host") or ""))
-            identity = ask("SSH identity file (blank = auto)", str(config.get("remote_identity") or "")).strip() or None
-            install_packages = confirm("Install capture-side packages when possible?", default=True)
-            run_bootstrap_remote(config, host=host, identity=identity, install_packages=install_packages)
+            if _enforce_command_support(config, "bootstrap-remote"):
+                host = ask("Remote host (user@host)", str(config.get("remote_host") or ""))
+                identity = ask("SSH identity file (blank = auto)", str(config.get("remote_identity") or "")).strip() or None
+                install_packages = confirm("Install capture-side packages when possible?", default=True)
+                run_bootstrap_remote(config, host=host, identity=identity, install_packages=install_packages)
         elif selection == 5:
-            host = ask("Remote host (user@host)", str(config.get("remote_host") or ""))
-            interface = ask("Remote interface", str(config.get("remote_interface") or "wlan0"))
-            duration_text = ask("Capture duration in seconds", str(config.get("capture_duration") or 60))
-            try:
-                duration = max(1, int(duration_text))
-            except ValueError:
-                warn(f"Invalid duration {duration_text!r}; using 60.")
-                duration = 60
-            run_mode = ask("Run stage after pull? (none/extract/detect/analyze/play/all)", "all").strip().lower()
-            if run_mode not in ("none", "extract", "detect", "analyze", "play", "all"):
-                run_mode = "none"
-            run_start_remote(config, host=host, interface=interface, duration=duration, run_mode=run_mode)
+            if _enforce_command_support(config, "start-remote"):
+                host = ask("Remote host (user@host)", str(config.get("remote_host") or ""))
+                interface = ask("Remote interface", str(config.get("remote_interface") or "wlan0"))
+                duration_text = ask("Capture duration in seconds", str(config.get("capture_duration") or 60))
+                try:
+                    duration = max(1, int(duration_text))
+                except ValueError:
+                    warn(f"Invalid duration {duration_text!r}; using 60.")
+                    duration = 60
+                run_mode = ask("Run stage after pull? (none/extract/detect/analyze/play/all)", "all").strip().lower()
+                if run_mode not in ("none", "extract", "detect", "analyze", "play", "all"):
+                    run_mode = "none"
+                run_start_remote(config, host=host, interface=interface, duration=duration, run_mode=run_mode)
         elif selection == 6:
-            host = ask("Remote host (user@host)", str(config.get("remote_host") or ""))
-            path = ask("Remote path (file or directory)", str(config.get("remote_path") or ""))
-            latest_only = confirm("Pull latest file from a directory/pattern?", default=True)
-            run_mode = ask("Run stage after pull? (none/extract/detect/analyze/play/all)", "all").strip().lower()
-            if run_mode not in ("none", "extract", "detect", "analyze", "play", "all"):
-                run_mode = "none"
-            pulled = pull_remote_capture(config, host=host, path=path, latest_only=latest_only)
-            if pulled and run_mode != "none":
-                _run_after_pull(config, str(pulled), run_mode)
+            if _enforce_command_support(config, "remote"):
+                host = ask("Remote host (user@host)", str(config.get("remote_host") or ""))
+                path = ask("Remote path (file or directory)", str(config.get("remote_path") or ""))
+                latest_only = confirm("Pull latest file from a directory/pattern?", default=True)
+                run_mode = ask("Run stage after pull? (none/extract/detect/analyze/play/all)", "all").strip().lower()
+                if run_mode not in ("none", "extract", "detect", "analyze", "play", "all"):
+                    run_mode = "none"
+                pulled = pull_remote_capture(config, host=host, path=path, latest_only=latest_only)
+                if pulled and run_mode != "none":
+                    _run_after_pull(config, str(pulled), run_mode)
         elif selection == 7:
-            method = ask("Capture method (airodump/besside/tcpdump)", str(config.get("monitor_method") or "airodump"))
-            run_monitor(config, method=method)
+            if _enforce_command_support(config, "monitor"):
+                method = ask("Capture method (airodump/besside/tcpdump)", str(config.get("monitor_method") or "airodump"))
+                run_monitor(config, method=method)
         elif selection == 8:
-            cap = ask("Path to handshake .cap (blank = auto-detect)", "").strip() or None
-            run_crack_decrypt(config, handshake_cap=cap)
+            if _enforce_command_support(config, "crack"):
+                cap = ask("Path to handshake .cap (blank = auto-detect)", "").strip() or None
+                run_crack_decrypt(config, handshake_cap=cap)
         elif selection == 9:
             source = input("  > Path to existing pcap: ").strip()
             if source:
@@ -1002,13 +1207,15 @@ def interactive_menu(config: Dict[str, object]) -> int:
         elif selection == 16:
             run_play(config)
         elif selection == 17:
-            decrypted = input("  > Directory of decrypted reference units (optional): ").strip() or None
-            strip_wifi = confirm("Strip the Wi-Fi layer when possible?", default=bool(resolve_wpa_password(config)))
-            run_all(config, None, decrypted, strip_wifi)
+            if _enforce_command_support(config, "all"):
+                decrypted = input("  > Directory of decrypted reference units (optional): ").strip() or None
+                strip_wifi = confirm("Strip the Wi-Fi layer when possible?", default=bool(resolve_wpa_password(config)))
+                run_all(config, None, decrypted, strip_wifi)
         elif selection == 18:
-            decrypted = input("  > Directory of decrypted reference units (optional): ").strip() or None
-            method = ask("Capture method (airodump/besside/tcpdump)", str(config.get("monitor_method") or "airodump"))
-            run_all_wifi(config, decrypted_dir=decrypted, method=method)
+            if _enforce_command_support(config, "wifi"):
+                decrypted = input("  > Directory of decrypted reference units (optional): ").strip() or None
+                method = ask("Capture method (airodump/besside/tcpdump)", str(config.get("monitor_method") or "airodump"))
+                run_all_wifi(config, decrypted_dir=decrypted, method=method)
         elif selection == 19:
             _show_report_summary(config)
         elif selection == 20:
@@ -1016,17 +1223,26 @@ def interactive_menu(config: Dict[str, object]) -> int:
         elif selection == 21:
             serve_dashboard()
         elif selection == 22:
-            run_doctor(
-                config,
-                host=str(config.get("remote_host") or "").strip() or None,
-                interface=str(config.get("remote_interface") or "").strip() or None,
-            )
+            if _enforce_command_support(config, "doctor"):
+                run_doctor(
+                    config,
+                    host=str(config.get("remote_host") or "").strip() or None,
+                    interface=str(config.get("remote_interface") or "").strip() or None,
+                )
         elif selection == 23:
-            run_validate_remote(
-                config,
-                host=str(config.get("remote_host") or "").strip() or None,
-                interface=str(config.get("remote_interface") or "").strip() or None,
-            )
+            validation_command = _active_validation_command(config)
+            if _enforce_command_support(config, validation_command):
+                if validation_command == "validate-local":
+                    run_validate_local(
+                        config,
+                        interface=str(config.get("interface") or "").strip() or None,
+                    )
+                else:
+                    run_validate_remote(
+                        config,
+                        host=str(config.get("remote_host") or "").strip() or None,
+                        interface=str(config.get("remote_interface") or "").strip() or None,
+                    )
         else:
             info("Goodbye.")
             return 0
@@ -1040,7 +1256,7 @@ def interactive_menu(config: Dict[str, object]) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="WiFi payload pipeline — supported path: Windows controller/analyzer plus Raspberry Pi OS or Ubuntu remote capture."
+        description=f"WiFi payload pipeline — official product modes: {SUPPORTED_PRODUCT_SUMMARY}."
     )
     parser.add_argument("--config", default=None, help="Path to a JSON config file")
     parser.add_argument("--stage", default=None, help=argparse.SUPPRESS)
@@ -1049,15 +1265,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers = parser.add_subparsers(dest="command")
 
-    subparsers.add_parser("menu", help="Open the guided dashboard interface (recommended: Windows controller + remote capture)")
+    subparsers.add_parser("menu", help="Open the guided dashboard interface (recommended: Linux standalone or Windows + Linux remote capture)")
     subparsers.add_parser("config", help="Launch interactive configuration")
 
     # ── Standard capture (all platforms) ─────────────────────────────────────
-    capture_p = subparsers.add_parser("capture", help="Local capture into a pcap (supported mainly for Linux/macOS or imported pcaps; experimental for Windows Wi-Fi)")
+    capture_p = subparsers.add_parser("capture", help="Local capture into a pcap (officially supported on Ubuntu and Raspberry Pi OS; experimental for Windows Wi-Fi and macOS)")
     capture_p.add_argument("--strip-wifi", action="store_true", help="Run airdecap-ng after capture")
 
     # ── Monitor mode (Linux/macOS, Windows when supported) ────────────────────
-    monitor_p = subparsers.add_parser("monitor", help="Experimental local monitor-mode capture (preferred product path is remote Raspberry Pi OS/Ubuntu capture)")
+    monitor_p = subparsers.add_parser("monitor", help="Local monitor-mode capture (Linux-first; experimental on Windows and macOS)")
     monitor_p.add_argument(
         "--method",
         default=None,
@@ -1070,7 +1286,7 @@ def build_parser() -> argparse.ArgumentParser:
     crack_p.add_argument("--cap", default=None, help="Path to handshake .cap file (auto-detected if omitted)")
 
     # ── Remote capture pull (SSH/SCP) ────────────────────────────────────────
-    remote_p = subparsers.add_parser("remote", help="Pull a capture from a supported remote capture device over SSH/SCP")
+    remote_p = subparsers.add_parser("remote", help="Pull a capture from an Ubuntu or Raspberry Pi OS capture device over SSH/SCP")
     remote_p.add_argument("--host", default=None, help="Remote host in user@host form")
     remote_p.add_argument("--path", default=None, help="Remote file path or directory")
     remote_p.add_argument("--port", default=None, type=int, help="SSH port (default: 22)")
@@ -1081,12 +1297,12 @@ def build_parser() -> argparse.ArgumentParser:
     remote_p.add_argument("--interval", default=None, type=int, help="Watch interval in seconds")
     remote_p.add_argument("--run", default="none", choices=["none", "extract", "detect", "analyze", "play", "all"], help="Run stages after pull")
 
-    pair_p = subparsers.add_parser("pair-remote", help="Install your SSH public key on a supported remote Raspberry Pi OS/Ubuntu capture device")
+    pair_p = subparsers.add_parser("pair-remote", help="Install your SSH public key on an Ubuntu or Raspberry Pi OS remote capture device")
     pair_p.add_argument("--host", default=None, help="Remote host in user@host form")
     pair_p.add_argument("--port", default=None, type=int, help="SSH port (default: 22)")
     pair_p.add_argument("--identity", default=None, help="SSH identity file (private key or .pub)")
 
-    bootstrap_p = subparsers.add_parser("bootstrap-remote", help="Prepare a supported Raspberry Pi OS/Ubuntu capture device over SSH")
+    bootstrap_p = subparsers.add_parser("bootstrap-remote", help="Prepare an Ubuntu or Raspberry Pi OS remote capture device over SSH")
     bootstrap_p.add_argument("--host", default=None, help="Remote host in user@host form")
     bootstrap_p.add_argument("--port", default=None, type=int, help="SSH port (default: 22)")
     bootstrap_p.add_argument("--identity", default=None, help="SSH identity file (private key or .pub)")
@@ -1095,7 +1311,7 @@ def build_parser() -> argparse.ArgumentParser:
     bootstrap_p.add_argument("--skip-packages", action="store_true", help="Do not install capture-side packages")
     bootstrap_p.add_argument("--skip-pair", action="store_true", help="Skip SSH key pairing before bootstrap")
 
-    setup_remote_p = subparsers.add_parser("setup-remote", help="Run the guided first-run Windows setup flow for the supported remote capture path")
+    setup_remote_p = subparsers.add_parser("setup-remote", help="Run the guided first-run Windows setup flow for the official remote-capture mode")
     setup_remote_p.add_argument("--host", default=None, help="Remote host in user@host form")
     setup_remote_p.add_argument("--port", default=None, type=int, help="SSH port (default: 22)")
     setup_remote_p.add_argument("--identity", default=None, help="SSH identity file (private key or .pub)")
@@ -1104,7 +1320,7 @@ def build_parser() -> argparse.ArgumentParser:
     setup_remote_p.add_argument("--dest", default=None, help="Local destination directory")
     setup_remote_p.add_argument("--smoke-test", action="store_true", help="Run a short remote smoke capture after setup")
 
-    start_remote_p = subparsers.add_parser("start-remote", help="Run the supported timed remote capture flow, pull it back, and optionally process it")
+    start_remote_p = subparsers.add_parser("start-remote", help="Run the official Windows remote-capture flow, pull it back, and optionally process it")
     start_remote_p.add_argument("--host", default=None, help="Remote host in user@host form")
     start_remote_p.add_argument("--port", default=None, type=int, help="SSH port (default: 22)")
     start_remote_p.add_argument("--identity", default=None, help="SSH identity file (private key or .pub)")
@@ -1123,7 +1339,7 @@ def build_parser() -> argparse.ArgumentParser:
     service_remote_p.add_argument("--duration", default=None, type=int, help="Capture duration in seconds for start")
     service_remote_p.add_argument("--output", default=None, help="Remote output path for start")
 
-    validate_remote_p = subparsers.add_parser("validate-remote", help="Run the supported hardware-validation flow and write a validation report")
+    validate_remote_p = subparsers.add_parser("validate-remote", help="Run the official Windows remote-capture validation flow and write a validation report")
     validate_remote_p.add_argument("--host", default=None, help="Remote host in user@host form")
     validate_remote_p.add_argument("--port", default=None, type=int, help="SSH port (default: 22)")
     validate_remote_p.add_argument("--identity", default=None, help="SSH identity file (private key or .pub)")
@@ -1132,6 +1348,12 @@ def build_parser() -> argparse.ArgumentParser:
     validate_remote_p.add_argument("--dest", default=None, help="Local destination directory for the smoke capture")
     validate_remote_p.add_argument("--report", default=None, help="Path to save the JSON validation report")
     validate_remote_p.add_argument("--skip-smoke", action="store_true", help="Run readiness checks only and skip the smoke capture")
+
+    validate_local_p = subparsers.add_parser("validate-local", help="Run the standalone Linux/local validation flow and write a JSON report")
+    validate_local_p.add_argument("--interface", default=None, help="Local capture interface, for example wlan0")
+    validate_local_p.add_argument("--duration", default=None, type=int, help="Smoke-capture duration in seconds")
+    validate_local_p.add_argument("--report", default=None, help="Path to save the JSON validation report")
+    validate_local_p.add_argument("--skip-smoke", action="store_true", help="Run readiness checks only and skip the smoke capture")
 
     # ── Full Wi-Fi pipeline ──────────────────────────────────────────────────
     wifi_p = subparsers.add_parser(
@@ -1159,7 +1381,7 @@ def build_parser() -> argparse.ArgumentParser:
     web_p.add_argument("--port", default=DEFAULT_WEB_PORT, type=int)
     web_p.add_argument("--no-browser", action="store_true")
 
-    subparsers.add_parser("deps", help="Check the environment, supported workflow target, and explicit product limits")
+    subparsers.add_parser("deps", help="Check the environment, official product modes, and explicit product limits")
 
     doctor_p = subparsers.add_parser("doctor", help="Check local tools and optional remote capture setup")
     doctor_p.add_argument("--host", default=None, help="Remote host in user@host form")
@@ -1202,6 +1424,10 @@ def main(argv: Optional[list] = None) -> int:
 
     banner()
     config = load_config(args.config)
+    has_input_pcap = bool(getattr(args, "pcap", None)) if getattr(args, "command", None) == "all" else False
+
+    if args.command and not _enforce_command_support(config, str(args.command), has_input_pcap=has_input_pcap):
+        return 1
 
     if args.command == "deps":
         return 0 if check_environment() else 1
@@ -1345,6 +1571,16 @@ def main(argv: Optional[list] = None) -> int:
             interface=getattr(args, "interface", None),
             duration=getattr(args, "duration", None),
             dest_dir=getattr(args, "dest", None),
+            report_path=getattr(args, "report", None),
+            skip_smoke=bool(getattr(args, "skip_smoke", False)),
+        )
+        return 0 if result else 1
+
+    if args.command == "validate-local":
+        result = run_validate_local(
+            config,
+            interface=getattr(args, "interface", None),
+            duration=getattr(args, "duration", None),
             report_path=getattr(args, "report", None),
             skip_smoke=bool(getattr(args, "skip_smoke", False)),
         )
