@@ -40,6 +40,9 @@ DEFAULT_CONFIG = {
     "remote_port": 22,
     "remote_identity": "",
     "remote_interface": "",
+    "remote_install_mode": "auto",
+    "remote_install_profile": "appliance",
+    "remote_health_port": 8741,
     "remote_dest_dir": "./pipeline_output/remote_imports",
     "remote_poll_interval": 8,
     # ── extraction ────────────────────────────────────────────────────────────
@@ -96,6 +99,9 @@ def load_config(path: Optional[str] = None) -> Dict[str, object]:
     config.setdefault("hashcat_rules", "")
     config.setdefault("monitor_method", "airodump")
     config.setdefault("remote_interface", "")
+    config.setdefault("remote_install_mode", "auto")
+    config.setdefault("remote_install_profile", "appliance")
+    config.setdefault("remote_health_port", 8741)
     if not config.get("replay_format_hint"):
         config["replay_format_hint"] = config.get("video_codec") or "raw"
     config.setdefault("corpus_review_threshold", 0.62)
@@ -266,6 +272,19 @@ def interactive_config(config: Dict[str, object]) -> Dict[str, object]:
             "Remote capture interface (optional, for start-remote)",
             str(config.get("remote_interface") or "wlan0"),
         )
+        config["remote_install_mode"] = ask(
+            "Remote install mode (auto/native/bundle)",
+            str(config.get("remote_install_mode") or "auto"),
+        ).strip().lower() or "auto"
+        config["remote_install_profile"] = ask(
+            "Remote install profile (standard/appliance)",
+            str(config.get("remote_install_profile") or "appliance"),
+        ).strip().lower() or "appliance"
+        if str(config.get("remote_install_profile") or "") == "appliance":
+            config["remote_health_port"] = ask_int(
+                "Remote health endpoint port",
+                int(config.get("remote_health_port", 8741)),
+            )
         config["remote_dest_dir"] = ask(
             "Local import directory",
             str(config.get("remote_dest_dir") or "./pipeline_output/remote_imports"),

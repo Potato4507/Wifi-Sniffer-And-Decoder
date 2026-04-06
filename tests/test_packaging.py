@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import tarfile
 import tomllib
 import zipfile
 from pathlib import Path
@@ -11,6 +13,16 @@ from wifi_pipeline import __version__
 def _load_build_release_module():
     script_path = Path("scripts/build_release.py").resolve()
     spec = importlib.util.spec_from_file_location("build_release", script_path)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_build_agent_bundle_module():
+    script_path = Path("scripts/build_agent_bundle.py").resolve()
+    spec = importlib.util.spec_from_file_location("build_agent_bundle", script_path)
     assert spec is not None
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -44,4 +56,28 @@ def test_build_release_script_creates_portable_zip(tmp_path) -> None:
     assert "validate_local.sh" in members
     assert "scripts/common.sh" in members
     assert "scripts/common.ps1" in members
+    assert "scripts/build_agent_bundle.py" in members
+    assert "scripts/release_gate.py" in members
+    assert "validation_matrix/README.md" in members
     assert "wifi_pipeline/cli.py" in members
+
+
+def test_build_agent_bundle_script_creates_self_contained_tarball(tmp_path) -> None:
+    build_agent_bundle = _load_build_agent_bundle_module()
+
+    bundle_path = build_agent_bundle.build_capture_agent_bundle(output_dir=tmp_path)
+
+    assert bundle_path.exists()
+    assert bundle_path.name.endswith("-bundle.tar.gz")
+    with tarfile.open(bundle_path, "r:gz") as archive:
+        members = set(archive.getnames())
+        manifest = json.loads(archive.extractfile("manifest.json").read().decode("utf-8"))
+        agent_script = archive.extractfile("bin/wifi-pipeline-agent").read().decode("utf-8")
+    assert "install.sh" in members
+    assert "bin/wifi-pipeline-agent" in members
+    assert "bin/wifi-pipeline-capture" in members
+    assert "bin/wifi-pipeline-service" in members
+    assert manifest["version"] == __version__
+    assert manifest["kind"] == "wifi-pipeline-agent-bundle"
+    assert "#!/usr/bin/env bash" in agent_script
+    assert 'PROTOCOL="capture-agent/v1"' in agent_script

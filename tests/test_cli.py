@@ -60,15 +60,44 @@ def test_build_parser_parses_pair_remote_arguments() -> None:
     assert args.host == "pi@raspberrypi"
 
 
+def test_build_parser_parses_discover_remote_arguments() -> None:
+    parser = cli.build_parser()
+
+    args = parser.parse_args(
+        ["discover-remote", "--network", "192.168.1.0/24", "--health-port", "9001", "--timeout", "0.5", "--max-hosts", "20"]
+    )
+
+    assert args.command == "discover-remote"
+    assert args.network == ["192.168.1.0/24"]
+    assert args.health_port == 9001
+    assert args.timeout == 0.5
+    assert args.max_hosts == 20
+
+
 def test_build_parser_parses_bootstrap_remote_arguments() -> None:
     parser = cli.build_parser()
 
     args = parser.parse_args(
-        ["bootstrap-remote", "--host", "pi@raspberrypi", "--skip-packages", "--skip-pair"]
+        [
+            "bootstrap-remote",
+            "--host",
+            "pi@raspberrypi",
+            "--install-mode",
+            "bundle",
+            "--install-profile",
+            "appliance",
+            "--health-port",
+            "9001",
+            "--skip-packages",
+            "--skip-pair",
+        ]
     )
 
     assert args.command == "bootstrap-remote"
     assert args.host == "pi@raspberrypi"
+    assert args.install_mode == "bundle"
+    assert args.install_profile == "appliance"
+    assert args.health_port == 9001
     assert args.skip_packages is True
     assert args.skip_pair is True
 
@@ -114,13 +143,31 @@ def test_build_parser_parses_setup_remote_arguments() -> None:
     parser = cli.build_parser()
 
     args = parser.parse_args(
-        ["setup-remote", "--host", "pi@raspberrypi", "--interface", "wlan0", "--duration", "30", "--smoke-test"]
+        [
+            "setup-remote",
+            "--host",
+            "pi@raspberrypi",
+            "--interface",
+            "wlan0",
+            "--duration",
+            "30",
+            "--install-mode",
+            "native",
+            "--install-profile",
+            "standard",
+            "--health-port",
+            "9002",
+            "--smoke-test",
+        ]
     )
 
     assert args.command == "setup-remote"
     assert args.host == "pi@raspberrypi"
     assert args.interface == "wlan0"
     assert args.duration == 30
+    assert args.install_mode == "native"
+    assert args.install_profile == "standard"
+    assert args.health_port == 9002
     assert args.smoke_test is True
 
 
@@ -149,6 +196,58 @@ def test_build_parser_parses_validate_local_arguments() -> None:
     assert args.skip_smoke is True
 
 
+def test_build_parser_parses_hardware_arguments() -> None:
+    parser = cli.build_parser()
+
+    args = parser.parse_args(["hardware"])
+
+    assert args.command == "hardware"
+
+
+def test_build_parser_parses_crack_status_arguments() -> None:
+    parser = cli.build_parser()
+
+    args = parser.parse_args(["crack-status", "--cap", "capture.cap"])
+
+    assert args.command == "crack-status"
+    assert args.cap == "capture.cap"
+
+
+def test_build_parser_parses_preflight_arguments() -> None:
+    parser = cli.build_parser()
+
+    args = parser.parse_args(["preflight"])
+
+    assert args.command == "preflight"
+
+
+def test_build_parser_parses_release_gate_arguments() -> None:
+    parser = cli.build_parser()
+
+    args = parser.parse_args(
+        [
+            "release-gate",
+            "--ubuntu-report",
+            "u.json",
+            "--pi-report",
+            "p.json",
+            "--windows-report",
+            "w.json",
+            "--sample-report",
+            "sample.json",
+            "--write-summary",
+            "summary.json",
+        ]
+    )
+
+    assert args.command == "release-gate"
+    assert args.ubuntu_report == "u.json"
+    assert args.pi_report == "p.json"
+    assert args.windows_report == "w.json"
+    assert args.sample_report == ["sample.json"]
+    assert args.write_summary == "summary.json"
+
+
 def test_run_play_prefers_offline_reconstruction(monkeypatch) -> None:
     report = {
         "candidate_material": {"mode": "static_xor_candidate", "key_hex": "01"},
@@ -175,6 +274,70 @@ def test_run_play_prefers_offline_reconstruction(monkeypatch) -> None:
     assert started == []
 
 
+def test_run_play_refuses_unsupported_replay_family(monkeypatch) -> None:
+    report = {
+        "candidate_material": {"mode": "static_xor_candidate", "key_hex": "01"},
+        "selected_candidate_stream": {"stream_id": "stream-1", "unit_type_counts": {"opaque_chunk": 1}},
+        "selected_protocol_support": {"replay_level": "unsupported", "detail": "unsupported family"},
+    }
+
+    monkeypatch.setattr(cli, "_load_report", lambda config: report)
+    monkeypatch.setattr(cli, "reconstruct_from_capture", lambda config, current_report: "should-not-run")
+
+    result = cli.run_play({"output_dir": "."})
+
+    assert result is None
+
+
+def test_run_preflight_returns_false_when_blocked(monkeypatch) -> None:
+    monkeypatch.setattr(
+        cli,
+        "print_pipeline_feasibility",
+        lambda config, report: {"status": "blocked", "replay": {"status": "blocked"}},
+    )
+    monkeypatch.setattr(cli, "_load_report", lambda config: None)
+
+    assert cli.run_preflight({"output_dir": "."}) is False
+
+
+def test_run_analyze_attaches_feasibility(monkeypatch) -> None:
+    report = {"selected_candidate_stream": {"stream_id": "stream-1"}, "candidate_material": {}}
+
+    class DummyAnalyzer:
+        def __init__(self, config) -> None:
+            self.config = config
+
+        def analyze(self, decrypted_dir=None):
+            return report
+
+    monkeypatch.setattr(cli, "CryptoAnalyzer", DummyAnalyzer)
+    monkeypatch.setattr(
+        cli,
+        "attach_feasibility_to_report",
+        lambda config, current_report, report_path: {**current_report, "feasibility": {"status": "blocked"}},
+    )
+
+    result = cli.run_analyze({"output_dir": "."}, None)
+
+    assert result["feasibility"]["status"] == "blocked"
+
+
+def test_run_release_gate_returns_true_when_fully_validated(monkeypatch, tmp_path) -> None:
+    written = {}
+    monkeypatch.setattr(cli, "evaluate_release_gate", lambda **kwargs: {"status": "ready", "fully_validated": True, "matrix": {}, "sample_reports": []})
+    monkeypatch.setattr(cli, "print_release_gate", lambda result: result)
+
+    from wifi_pipeline import release_gate as release_gate_module
+
+    monkeypatch.setattr(
+        release_gate_module,
+        "write_release_gate_summary",
+        lambda result, path: written.setdefault("path", str(path)) or path,
+    )
+
+    assert cli.run_release_gate({}, write_summary=str(tmp_path / "summary.json")) is True
+
+
 def test_run_start_remote_runs_followup_stages(monkeypatch) -> None:
     calls: list[str] = []
 
@@ -188,7 +351,7 @@ def test_run_start_remote_runs_followup_stages(monkeypatch) -> None:
 
 
 def test_run_doctor_combines_local_and_remote_checks(monkeypatch) -> None:
-    monkeypatch.setattr(cli, "check_environment", lambda: True)
+    monkeypatch.setattr(cli, "check_environment", lambda config=None: True)
     monkeypatch.setattr(
         cli,
         "doctor_remote_host",
@@ -199,6 +362,14 @@ def test_run_doctor_combines_local_and_remote_checks(monkeypatch) -> None:
             "remote": {
                 "reachable": True,
                 "home": "/home/pi",
+                "agent": True,
+                "agent_path": "/home/pi/.local/bin/wifi-pipeline-agent",
+                "agent_protocol": "capture-agent/v1",
+                "control_mode": "agent",
+                "install_profile": "appliance",
+                "health_endpoint": "http://0.0.0.0:8741/health",
+                "health_socket_enabled": True,
+                "appliance_service_enabled": True,
                 "tcpdump": True,
                 "helper": True,
                 "helper_path": "/home/pi/.local/bin/wifi-pipeline-capture",
@@ -220,6 +391,26 @@ def test_run_doctor_combines_local_and_remote_checks(monkeypatch) -> None:
     assert cli.run_doctor({"remote_host": "pi@raspberrypi"}, interface="wlan0") is True
 
 
+def test_run_discover_remote_returns_results(monkeypatch) -> None:
+    monkeypatch.setattr(
+        cli,
+        "discover_remote_appliances",
+        lambda *args, **kwargs: [
+            {
+                "device_name": "pi-node",
+                "host": "192.168.1.10",
+                "ssh_target": "pi@192.168.1.10",
+                "health_endpoint": "http://192.168.1.10:8741/health",
+                "install_profile": "appliance",
+            }
+        ],
+    )
+
+    results = cli.run_discover_remote({}, max_hosts=8)
+
+    assert results[0]["ssh_target"] == "pi@192.168.1.10"
+
+
 def test_run_remote_service_calls_remote_helper(monkeypatch) -> None:
     monkeypatch.setattr(cli, "remote_service_host", lambda *args, **kwargs: {"service_status": "idle"})
 
@@ -229,15 +420,22 @@ def test_run_remote_service_calls_remote_helper(monkeypatch) -> None:
 def test_run_setup_remote_saves_config_and_smoke_tests(monkeypatch) -> None:
     saved: dict[str, object] = {}
     smoke_calls: list[dict[str, object]] = []
+    bootstrap_calls: list[dict[str, object]] = []
 
     monkeypatch.setattr(cli, "IS_WINDOWS", True)
+    monkeypatch.setattr(
+        cli,
+        "discover_remote_appliances",
+        lambda *args, **kwargs: [{"device_name": "pi-node", "host": "192.168.1.10", "ssh_target": "pi@192.168.1.10"}],
+    )
     monkeypatch.setattr(cli, "run_pair_remote", lambda *args, **kwargs: True)
     monkeypatch.setattr(
         cli,
         "run_bootstrap_remote",
-        lambda *args, **kwargs: {
+        lambda *args, **kwargs: bootstrap_calls.append(dict(kwargs)) or {
             "capture_dir": "/home/pi/wifi-pipeline/captures",
             "service_cmd": "/home/pi/wifi-pipeline/bin/wifi-pipeline-service",
+            "health_endpoint": "http://0.0.0.0:8741/health",
         },
     )
     monkeypatch.setattr(cli, "run_doctor", lambda *args, **kwargs: True)
@@ -256,26 +454,35 @@ def test_run_setup_remote_saves_config_and_smoke_tests(monkeypatch) -> None:
     result = cli.run_setup_remote(
         config,
         config_path="custom.json",
-        host="pi@raspberrypi",
+        host=None,
         port=2222,
         identity="C:\\keys\\pi",
         interface="wlan0",
         dest_dir="./imports",
         duration=30,
+        install_mode="bundle",
+        install_profile="appliance",
+        health_port=8741,
         smoke_test=True,
     )
 
     assert result is True
     assert saved["path"] == "custom.json"
-    assert saved["config"]["remote_host"] == "pi@raspberrypi"
+    assert saved["config"]["remote_host"] == "pi@192.168.1.10"
     assert saved["config"]["remote_port"] == 2222
     assert saved["config"]["remote_identity"] == "C:\\keys\\pi"
     assert saved["config"]["remote_interface"] == "wlan0"
+    assert saved["config"]["remote_install_mode"] == "bundle"
+    assert saved["config"]["remote_install_profile"] == "appliance"
+    assert saved["config"]["remote_health_port"] == 8741
     assert saved["config"]["remote_dest_dir"] == "./imports"
     assert saved["config"]["remote_path"] == "/home/pi/wifi-pipeline/captures/"
+    assert bootstrap_calls[0]["install_mode"] == "bundle"
+    assert bootstrap_calls[0]["install_profile"] == "appliance"
+    assert bootstrap_calls[0]["health_port"] == 8741
     assert smoke_calls == [
         {
-            "host": "pi@raspberrypi",
+            "host": "pi@192.168.1.10",
             "port": 2222,
             "identity": "C:\\keys\\pi",
             "interface": "wlan0",
@@ -290,7 +497,7 @@ def test_run_validate_remote_writes_report(monkeypatch, tmp_path) -> None:
     capture_path = tmp_path / "capture.pcap"
     capture_path.write_bytes(b"pcap")
 
-    monkeypatch.setattr(cli, "check_environment", lambda: True)
+    monkeypatch.setattr(cli, "check_environment", lambda config=None: True)
     monkeypatch.setattr(
         cli,
         "doctor_remote_host",
@@ -322,7 +529,7 @@ def test_run_validate_remote_writes_report(monkeypatch, tmp_path) -> None:
 def test_run_validate_remote_skip_smoke_can_still_pass(monkeypatch, tmp_path) -> None:
     report_path = tmp_path / "validation.json"
 
-    monkeypatch.setattr(cli, "check_environment", lambda: True)
+    monkeypatch.setattr(cli, "check_environment", lambda config=None: True)
     monkeypatch.setattr(
         cli,
         "doctor_remote_host",
@@ -351,7 +558,7 @@ def test_run_validate_local_writes_report(monkeypatch, tmp_path) -> None:
     capture_path.write_bytes(b"pcap")
     report_path = tmp_path / "standalone-validation.json"
 
-    monkeypatch.setattr(cli, "check_environment", lambda: True)
+    monkeypatch.setattr(cli, "check_environment", lambda config=None: True)
     monkeypatch.setattr(cli, "list_interfaces", lambda: [("1", "wlan0", "wireless")])
     monkeypatch.setattr(cli, "run_capture", lambda config, strip_wifi=False: str(capture_path))
     monkeypatch.setattr(cli, "run_extract", lambda config, pcap: {"streams": 1})
@@ -376,7 +583,7 @@ def test_run_validate_local_writes_report(monkeypatch, tmp_path) -> None:
 def test_run_validate_local_skip_smoke_can_still_pass(monkeypatch, tmp_path) -> None:
     report_path = tmp_path / "standalone-validation.json"
 
-    monkeypatch.setattr(cli, "check_environment", lambda: True)
+    monkeypatch.setattr(cli, "check_environment", lambda config=None: True)
     monkeypatch.setattr(cli, "list_interfaces", lambda: [("1", "wlan0", "wireless")])
 
     result = cli.run_validate_local(

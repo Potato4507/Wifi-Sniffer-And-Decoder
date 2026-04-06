@@ -13,6 +13,9 @@ supported Windows dependencies when they are missing.
 .\setup_remote.ps1 -Host pi@raspberrypi -Interface wlan0 -SmokeTest
 
 .EXAMPLE
+.\setup_remote.ps1 -InstallMode bundle -InstallProfile appliance
+
+.EXAMPLE
 .\setup_remote.ps1 -SkipInstallDeps -Host pi@raspberrypi -Interface wlan0
 #>
 
@@ -28,6 +31,12 @@ param(
     [ValidateRange(1, 65535)]
     [int]$Port = 22,
     [string]$Dest = "",
+    [ValidateSet("auto", "native", "bundle")]
+    [string]$InstallMode = "",
+    [ValidateSet("standard", "appliance")]
+    [string]$InstallProfile = "",
+    [ValidateRange(1, 65535)]
+    [int]$HealthPort = 8741,
     [switch]$SmokeTest,
     [switch]$InstallDeps,
     [switch]$SkipInstallDeps
@@ -47,10 +56,16 @@ Add-ArgumentPair -List $argsList -Name "--host" -Value $RemoteHost
 Add-ArgumentPair -List $argsList -Name "--interface" -Value $Interface
 Add-ArgumentPair -List $argsList -Name "--identity" -Value $Identity
 Add-ArgumentPair -List $argsList -Name "--dest" -Value $Dest
+Add-ArgumentPair -List $argsList -Name "--install-mode" -Value $InstallMode
+Add-ArgumentPair -List $argsList -Name "--install-profile" -Value $InstallProfile
 $argsList.Add("--port")
 $argsList.Add([string]$Port)
 $argsList.Add("--duration")
 $argsList.Add([string]$Duration)
+if ($InstallProfile) {
+    $argsList.Add("--health-port")
+    $argsList.Add([string]$HealthPort)
+}
 if ($SmokeTest) {
     $argsList.Add("--smoke-test")
 }

@@ -117,6 +117,8 @@ def test_format_detector_detect_writes_report(tmp_path) -> None:
     report = detector.detect()
 
     assert report["selected_candidate_stream"]["stream_id"] == "stream-image"
+    assert report["selected_protocol_support"]["dominant_unit_type"] == "png_image"
+    assert report["selected_protocol_support"]["replay_level"] == "guaranteed"
     assert report["protocol_hits"]["png"] == 1
     assert (output_dir / "detection_report.json").exists()
 
@@ -169,3 +171,19 @@ def test_crypto_analyzer_helper_methods(tmp_path) -> None:
     assert analyzer._xor(b"\x01\x02", b"\x03\x01") == b"\x02\x03"
     assert analyzer._period(b"ABABABAB", max_period=8) == 2
     assert analyzer._selected_stream(manifest)["stream_id"] == "stream-opaque"
+
+
+def test_crypto_analyzer_report_includes_protocol_support(tmp_path) -> None:
+    manifest = _sample_manifest(tmp_path)
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    analyzer = CryptoAnalyzer({"output_dir": str(tmp_path), "min_candidate_bytes": 1024})
+    analyzer.corpus.find_matches = lambda *args, **kwargs: []
+    analyzer.corpus.archive_candidate = lambda *args, **kwargs: None
+    analyzer.corpus.status = lambda: {"entry_count": 0, "candidate_material_count": 0}
+
+    report = analyzer.analyze()
+
+    assert report["selected_candidate_stream"]["stream_id"] == "stream-image"
+    assert report["selected_protocol_support"]["dominant_unit_type"] == "png_image"
+    assert report["selected_protocol_support"]["replay_level"] == "guaranteed"

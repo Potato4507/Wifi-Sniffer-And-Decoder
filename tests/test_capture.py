@@ -104,6 +104,82 @@ def test_strip_wifi_layer_moves_generated_output(monkeypatch, tmp_path) -> None:
     assert (tmp_path / "decrypted_wifi.pcapng").read_bytes() == b"decrypted"
 
 
+def test_inspect_wpa_crack_path_reports_known_key_supplied(monkeypatch, tmp_path) -> None:
+    handshake = tmp_path / "handshake.cap"
+    handshake.write_bytes(b"x" * 4096)
+
+    monkeypatch.setattr(
+        "wifi_pipeline.capture.shutil.which",
+        lambda tool: "tool" if tool == "airdecap-ng" else None,
+    )
+    capture = Capture(
+        {
+            "output_dir": str(tmp_path),
+            "ap_essid": "TestNet",
+            "wpa_password": "secret",
+        }
+    )
+
+    readiness = capture.inspect_wpa_crack_path(str(handshake))
+
+    assert readiness.state == "known_key_supplied"
+    assert readiness.crack_ready is True
+    assert readiness.decrypt_ready is True
+
+
+def test_inspect_wpa_crack_path_reports_wordlist_attack_supported(monkeypatch, tmp_path) -> None:
+    handshake = tmp_path / "handshake.cap"
+    handshake.write_bytes(b"x" * 4096)
+    wordlist = tmp_path / "words.txt"
+    wordlist.write_text("password\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "wifi_pipeline.capture.shutil.which",
+        lambda tool: {
+            "aircrack-ng": "/usr/bin/aircrack-ng",
+            "airdecap-ng": "/usr/bin/airdecap-ng",
+        }.get(tool),
+    )
+    capture = Capture(
+        {
+            "output_dir": str(tmp_path),
+            "ap_essid": "TestNet",
+            "wordlist_path": str(wordlist),
+        }
+    )
+
+    readiness = capture.inspect_wpa_crack_path(str(handshake))
+
+    assert readiness.state == "known_wordlist_attack_supported"
+    assert readiness.crack_ready is True
+    assert readiness.status == "supported_with_limits"
+
+
+def test_inspect_wpa_crack_path_reports_tiny_handshake(monkeypatch, tmp_path) -> None:
+    handshake = tmp_path / "handshake.cap"
+    handshake.write_bytes(b"x" * 64)
+    monkeypatch.setattr("wifi_pipeline.capture.shutil.which", lambda tool: None)
+    capture = Capture({"output_dir": str(tmp_path)})
+
+    readiness = capture.inspect_wpa_crack_path(str(handshake))
+
+    assert readiness.state == "captured_handshake_insufficient"
+    assert readiness.crack_ready is False
+
+
+def test_crack_and_decrypt_fails_early_when_decrypt_prereqs_missing(monkeypatch, tmp_path) -> None:
+    handshake = tmp_path / "handshake.cap"
+    handshake.write_bytes(b"x" * 4096)
+    capture = Capture({"output_dir": str(tmp_path), "wpa_password": "secret", "ap_essid": ""})
+
+    monkeypatch.setattr("wifi_pipeline.capture.shutil.which", lambda tool: None)
+    monkeypatch.setattr(Capture, "strip_wifi_layer", lambda self, pcap_path=None: "should-not-run")
+
+    result = capture.crack_and_decrypt(str(handshake))
+
+    assert result is None
+
+
 def test_run_monitor_uses_windows_dumpcap_for_tcpdump_mode(monkeypatch, tmp_path) -> None:
     called: list[str] = []
 

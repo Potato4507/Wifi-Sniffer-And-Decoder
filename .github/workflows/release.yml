@@ -42,6 +42,15 @@ jobs:
       - name: Build portable release archive
         run: python scripts/build_release.py
 
+      - name: Enforce real validation matrix gate
+        shell: bash
+        run: |
+          SAMPLE_ARGS=()
+          while IFS= read -r path; do
+            SAMPLE_ARGS+=(--sample-report "$path")
+          done < <(find validation_matrix -maxdepth 1 -type f -name 'sample*_analysis.json' | sort)
+          python scripts/release_gate.py "${SAMPLE_ARGS[@]}" --write-summary dist/release-gate.json
+
       - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4
         with:

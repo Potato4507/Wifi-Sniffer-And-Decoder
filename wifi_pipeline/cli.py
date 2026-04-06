@@ -18,14 +18,23 @@ from .environment import (
     IS_WINDOWS,
     SUPPORTED_PRODUCT_SUMMARY,
     command_support,
-    list_interfaces,
-    resolve_product_profile,
     check_environment,
+    hardware_qualification_report,
+    list_interfaces,
+    print_hardware_qualification,
+    resolve_product_profile,
 )
 from .extract import StreamExtractor
-from .playback import ExperimentalPlayback, infer_replay_hint, reconstruct_from_capture
+from .feasibility import (
+    attach_feasibility_to_report,
+    evaluate_pipeline_feasibility,
+    print_pipeline_feasibility,
+)
+from .playback import ExperimentalPlayback, infer_replay_hint, reconstruct_from_capture, replay_support_summary
+from .release_gate import evaluate_release_gate, print_release_gate
 from .remote import (
     bootstrap_remote_host,
+    discover_remote_appliances,
     doctor_remote_host,
     pair_remote_host,
     pull_remote_capture,
@@ -35,7 +44,7 @@ from .remote import (
 )
 from .ui import (
     BOLD, CYAN, DIM, GREEN, RED, RESET, YELLOW,
-    ask, ask_int, banner, choose, confirm, done, err, info, section, warn,
+    ask, ask_int, banner, choose, confirm, done, err, info, ok, section, warn,
 )
 from .webapp import DEFAULT_WEB_HOST, DEFAULT_WEB_PORT, serve_dashboard
 
@@ -149,11 +158,11 @@ def _recommended_next_command(config: Dict[str, object], has_candidate: bool = F
     profile = resolve_product_profile(config)
     if profile.key == "windows_remote":
         if not str(config.get("remote_host") or "").strip():
-            return r".\setup_remote.ps1 -InstallDeps"
+            return r".\setup_remote.ps1"
         return r".\run_remote.ps1 -Host <user@host> -Interface <wlan0> -DoctorFirst"
     if profile.key in ("ubuntu_standalone", "pi_standalone"):
         if not str(config.get("interface") or "").strip():
-            return "bash ./setup_local.sh --install-deps"
+            return "bash ./setup_local.sh"
         if has_candidate:
             return "python3 videopipeline.py play"
         return "bash ./run_local.sh"
@@ -176,6 +185,47 @@ def _active_validation_label(config: Dict[str, object]) -> str:
     return "Run supported validation"
 
 
+def run_hardware(config: Dict[str, object]) -> bool:
+    print_hardware_qualification(config)
+    return True
+
+
+def run_crack_status(config: Dict[str, object], handshake_cap: Optional[str] = None) -> bool:
+    capture = Capture(config)
+    readiness = capture.print_wpa_crack_status(handshake_cap=handshake_cap)
+    return readiness.status != "unsupported"
+
+
+def run_preflight(config: Dict[str, object]) -> bool:
+    report = _load_report(config)
+    feasibility = print_pipeline_feasibility(config, report)
+    return feasibility.get("status") != "blocked"
+
+
+def run_release_gate(
+    config: Dict[str, object],
+    *,
+    ubuntu_report: Optional[str] = None,
+    pi_report: Optional[str] = None,
+    windows_report: Optional[str] = None,
+    sample_reports: Optional[list[str]] = None,
+    write_summary: Optional[str] = None,
+) -> bool:
+    result = evaluate_release_gate(
+        ubuntu_report=Path(ubuntu_report).resolve() if ubuntu_report else Path("validation_matrix/ubuntu_standalone_validation.json"),
+        pi_report=Path(pi_report).resolve() if pi_report else Path("validation_matrix/pi_standalone_validation.json"),
+        windows_report=Path(windows_report).resolve() if windows_report else Path("validation_matrix/windows_remote_validation.json"),
+        sample_reports=[Path(path).resolve() for path in (sample_reports or [])],
+    )
+    print_release_gate(result)
+    if write_summary:
+        from .release_gate import write_release_gate_summary
+
+        summary_path = write_release_gate_summary(result, Path(write_summary).resolve())
+        info(f"Release-gate summary written to {summary_path}")
+    return bool(result.get("fully_validated"))
+
+
 def _run_after_pull(config: Dict[str, object], pcap_path: str, mode: str) -> None:
     run_extract(config, pcap_path)
     if mode in ("detect", "analyze", "play", "all"):
@@ -195,6 +245,38 @@ def run_pair_remote(
     return pair_remote_host(config, host=host, port=port, identity=identity)
 
 
+def run_discover_remote(
+    config: Dict[str, object],
+    *,
+    networks: Optional[list[str]] = None,
+    health_port: Optional[int] = None,
+    timeout: float = 0.35,
+    max_hosts: int = 64,
+) -> list[Dict[str, str]]:
+    section("Remote Appliance Discovery")
+    results = discover_remote_appliances(
+        config,
+        networks=networks,
+        health_port=health_port,
+        timeout=timeout,
+        max_hosts=max_hosts,
+    )
+    if not results:
+        warn("No appliance-style capture nodes responded on the local network.")
+        return []
+
+    for record in results:
+        label = str(record.get("device_name") or record.get("host") or "appliance")
+        ssh_target = str(record.get("ssh_target") or record.get("host") or "")
+        health_endpoint = str(record.get("health_endpoint") or "")
+        install_profile = str(record.get("install_profile") or "standard")
+        info(f"{label}: {ssh_target} ({install_profile})")
+        if health_endpoint:
+            info(f"  health: {health_endpoint}")
+    done(f"Discovered {len(results)} appliance node(s).")
+    return results
+
+
 def run_bootstrap_remote(
     config: Dict[str, object],
     host: Optional[str] = None,
@@ -203,6 +285,9 @@ def run_bootstrap_remote(
     remote_root: Optional[str] = None,
     capture_dir: Optional[str] = None,
     install_packages: bool = True,
+    install_mode: Optional[str] = None,
+    install_profile: Optional[str] = None,
+    health_port: Optional[int] = None,
     pair: bool = True,
 ) -> Optional[Dict[str, str]]:
     return bootstrap_remote_host(
@@ -213,6 +298,9 @@ def run_bootstrap_remote(
         remote_root=remote_root,
         capture_dir=capture_dir,
         install_packages=install_packages,
+        install_mode=install_mode,
+        install_profile=install_profile,
+        health_port=health_port,
         pair=pair,
     )
 
@@ -276,6 +364,9 @@ def run_setup_remote(
     interface: Optional[str] = None,
     dest_dir: Optional[str] = None,
     duration: Optional[int] = None,
+    install_mode: Optional[str] = None,
+    install_profile: Optional[str] = None,
+    health_port: Optional[int] = None,
     smoke_test: bool = False,
 ) -> bool:
     section("Windows Remote Setup")
@@ -284,7 +375,34 @@ def run_setup_remote(
     else:
         warn("This guided setup is Windows-first, but it can still prepare the official Windows remote-capture mode.")
 
-    resolved_host = (host if host is not None else ask("Remote host (user@host)", str(config.get("remote_host") or "pi@raspberrypi"))).strip()
+    existing_host = str(config.get("remote_host") or "").strip()
+    discovered_nodes: list[Dict[str, str]] = []
+    default_health_port = int(health_port if health_port is not None else int(config.get("remote_health_port", 8741) or 8741))
+    if host is None and not existing_host:
+        info("No remote host is configured yet. Looking for appliance capture nodes on the local network...")
+        discovered_nodes = discover_remote_appliances(config, health_port=default_health_port)
+        if len(discovered_nodes) == 1:
+            node = discovered_nodes[0]
+            existing_host = str(node.get("ssh_target") or node.get("host") or "").strip()
+            if existing_host:
+                ok(f"Discovered appliance: {existing_host}")
+        elif len(discovered_nodes) > 1:
+            labels = [
+                f"{node.get('device_name') or node.get('host')} -> {node.get('ssh_target') or node.get('host')}"
+                for node in discovered_nodes
+            ]
+            selected = choose("Select a discovered appliance", labels, default=0)
+            node = discovered_nodes[selected]
+            existing_host = str(node.get("ssh_target") or node.get("host") or "").strip()
+            if existing_host:
+                ok(f"Selected appliance: {existing_host}")
+
+    if host is not None:
+        resolved_host = str(host).strip()
+    elif discovered_nodes and existing_host:
+        resolved_host = existing_host
+    else:
+        resolved_host = ask("Remote host (user@host)", existing_host or "pi@raspberrypi").strip()
     if not resolved_host:
         err("Remote host is required for setup.")
         return False
@@ -312,6 +430,25 @@ def run_setup_remote(
     resolved_duration = int(
         duration if duration is not None else ask_int("Default remote capture duration in seconds", int(config.get("capture_duration", 60) or 60))
     )
+    resolved_install_mode = (
+        str(install_mode).strip().lower()
+        if install_mode is not None
+        else str(config.get("remote_install_mode") or "auto").strip().lower()
+    )
+    resolved_install_profile = (
+        str(install_profile).strip().lower()
+        if install_profile is not None
+        else str(config.get("remote_install_profile") or "appliance").strip().lower()
+    )
+    resolved_health_port = int(
+        health_port if health_port is not None else int(config.get("remote_health_port", 8741) or 8741)
+    )
+    if resolved_install_mode not in ("auto", "native", "bundle"):
+        warn(f"Unknown remote install mode {resolved_install_mode!r}; using auto.")
+        resolved_install_mode = "auto"
+    if resolved_install_profile not in ("standard", "appliance"):
+        warn(f"Unknown remote install profile {resolved_install_profile!r}; using appliance.")
+        resolved_install_profile = "appliance"
     if resolved_duration <= 0:
         warn("Default capture duration must be positive; using 60 seconds.")
         resolved_duration = 60
@@ -321,6 +458,9 @@ def run_setup_remote(
     config["remote_identity"] = resolved_identity
     config["remote_interface"] = resolved_interface
     config["remote_dest_dir"] = resolved_dest
+    config["remote_install_mode"] = resolved_install_mode
+    config["remote_install_profile"] = resolved_install_profile
+    config["remote_health_port"] = resolved_health_port
     config["capture_duration"] = resolved_duration
 
     save_target = config_path or "lab.json"
@@ -335,6 +475,9 @@ def run_setup_remote(
         port=resolved_port,
         identity=resolved_identity or None,
         install_packages=True,
+        install_mode=resolved_install_mode,
+        install_profile=resolved_install_profile,
+        health_port=resolved_health_port,
         pair=False,
     )
     if not bootstrap_result:
@@ -401,6 +544,20 @@ def _print_remote_doctor(report: Dict[str, object]) -> None:
     print(f"    Reachable        : {_status_label(bool(remote.get('reachable')), 'yes', 'no')}")
     if remote.get("home"):
         print(f"    Home             : {remote.get('home')}")
+    print(f"    Control mode     : {_status_label(bool(remote.get('agent')), 'agent', str(remote.get('control_mode') or 'legacy shell'))}")
+    if remote.get("agent_path"):
+        print(f"    Agent path       : {remote.get('agent_path')}")
+    if remote.get("agent_protocol"):
+        print(f"    Agent protocol   : {remote.get('agent_protocol')}")
+    print(f"    Install profile  : {remote.get('install_profile') or 'standard'}")
+    if remote.get("health_endpoint"):
+        print(f"    Health endpoint  : {remote.get('health_endpoint')}")
+    health_socket_enabled = remote.get("health_socket_enabled")
+    if health_socket_enabled is not None:
+        print(f"    Health socket    : {_status_label(bool(health_socket_enabled), 'enabled', 'disabled')}")
+    appliance_service_enabled = remote.get("appliance_service_enabled")
+    if appliance_service_enabled is not None:
+        print(f"    Appliance svc    : {_status_label(bool(appliance_service_enabled), 'enabled', 'disabled')}")
     print(f"    tcpdump          : {_status_label(bool(remote.get('tcpdump')), 'present', 'missing')}")
     print(f"    Helper           : {_status_label(bool(remote.get('helper')), 'present', 'missing')}")
     if remote.get("helper_path"):
@@ -456,7 +613,11 @@ def _print_remote_doctor(report: Dict[str, object]) -> None:
         else:
             label = f"{YELLOW}unknown{RESET}"
         print(f"    Interface        : {interface_name} ({label})")
-    if not privilege_ready:
+    if str(remote.get("install_profile") or "") == "appliance" and not remote.get("health_endpoint"):
+        print(f"    Next step        : re-run bootstrap-remote with --install-profile appliance")
+    elif not bool(remote.get("agent")):
+        print(f"    Next step        : re-run bootstrap-remote to install the managed capture agent")
+    elif not privilege_ready:
         print(f"    Next step        : re-run bootstrap-remote with a remote user that has sudo access")
 
 
@@ -468,7 +629,7 @@ def run_doctor(
     interface: Optional[str] = None,
 ) -> bool:
     section("Doctor")
-    local_ok = check_environment()
+    local_ok = check_environment(config)
     remote_host = host or str(config.get("remote_host") or "").strip() or None
     if not remote_host:
         info("No remote host configured. Skipping remote doctor checks.")
@@ -520,6 +681,7 @@ def run_validate_remote(
             "skip_smoke": bool(skip_smoke),
         },
         "environment_ok": False,
+        "hardware_qualification": [],
         "doctor": {},
         "service_status_before": {},
         "smoke_capture": {
@@ -533,8 +695,21 @@ def run_validate_remote(
         "overall_ok": False,
     }
 
-    env_ok = check_environment()
+    env_ok = check_environment(config)
     validation["environment_ok"] = env_ok
+    validation["hardware_qualification"] = [
+        {
+            "area": row.area,
+            "label": row.label,
+            "status": row.status,
+            "summary": row.summary,
+            "detail": row.detail,
+            "monitor_mode": row.monitor_mode,
+            "injection": row.injection,
+            "channels": row.channels,
+        }
+        for row in hardware_qualification_report(config)
+    ]
 
     doctor_report = doctor_remote_host(
         config,
@@ -651,6 +826,7 @@ def run_validate_local(
             "skip_smoke": bool(skip_smoke),
         },
         "environment_ok": False,
+        "hardware_qualification": [],
         "product_profile": {
             "key": profile.key,
             "label": profile.label,
@@ -675,12 +851,27 @@ def run_validate_local(
             "manifest_path": str(_manifest_path(config)),
             "detection_report_path": str(_detection_report_path(config)),
             "analysis_report_path": str(_analysis_report_path(config)),
+            "selected_protocol_support": {},
+            "analysis_preflight": {},
         },
         "overall_ok": False,
     }
 
-    env_ok = check_environment()
+    env_ok = check_environment(config)
     validation["environment_ok"] = env_ok
+    validation["hardware_qualification"] = [
+        {
+            "area": row.area,
+            "label": row.label,
+            "status": row.status,
+            "summary": row.summary,
+            "detail": row.detail,
+            "monitor_mode": row.monitor_mode,
+            "injection": row.injection,
+            "channels": row.channels,
+        }
+        for row in hardware_qualification_report(smoke_config)
+    ]
 
     if not target_interface:
         warn("No local capture interface is configured for standalone validation.")
@@ -708,6 +899,13 @@ def run_validate_local(
                 analysis = run_analyze(smoke_config, None)
                 processing_ok = bool(manifest) and bool(detection) and bool(analysis)
                 validation["processing_smoke"]["success"] = processing_ok
+                if analysis:
+                    validation["processing_smoke"]["selected_protocol_support"] = dict(
+                        analysis.get("selected_protocol_support") or {}
+                    )
+                    validation["processing_smoke"]["analysis_preflight"] = dict(
+                        analysis.get("feasibility") or {}
+                    )
             else:
                 warn("Standalone smoke capture did not produce a readable pcap.")
         else:
@@ -773,6 +971,9 @@ def _print_dashboard(config: Dict[str, object]) -> None:
     print(f"    Wordlist         : {config.get('wordlist_path') or f'{DIM}(unset){RESET}'}")
     wpa_available = bool(resolve_wpa_password(config))
     print(f"    WPA Password     : {_status_label(wpa_available, 'set (env/session)', 'not set')}")
+    wpa_state = Capture(config).inspect_wpa_crack_path(str(handshake) if handshake else None)
+    wpa_state_text = wpa_state.state.replace("_", " ")
+    print(f"    WPA Path         : {wpa_state_text}")
 
     print(f"\n  {BOLD}Artifacts{RESET}")
     print(f"    Capture          : {_status_label(capture_path.exists(), 'ready')}")
@@ -803,10 +1004,21 @@ def _print_dashboard(config: Dict[str, object]) -> None:
     if analysis:
         hypotheses = analysis.get("hypotheses", [])
         hypothesis = str(hypotheses[0].get("name") or "") if hypotheses else ""
+        replay_support = dict(analysis.get("selected_protocol_support") or {})
+        feasibility = dict(analysis.get("feasibility") or {})
+        replay_feasibility = dict(feasibility.get("replay") or {})
         print(f"\n  {BOLD}Latest Analysis{RESET}")
         print(f"    Units Analyzed   : {analysis.get('total_units', 0)}")
         print(f"    Entropy          : {analysis.get('ciphertext_observations', {}).get('average_entropy', '?')}")
         print(f"    Lead Hypothesis  : {hypothesis or f'{DIM}(none){RESET}'}")
+        if replay_support:
+            print(
+                f"    Replay Support   : "
+                f"{replay_support.get('replay_level', 'unsupported')} "
+                f"({replay_support.get('dominant_unit_type', 'opaque_chunk')})"
+            )
+        if replay_feasibility:
+            print(f"    Preflight        : {replay_feasibility.get('status', 'blocked')}")
         corpus = analysis.get("corpus") or {}
         best_match = corpus.get("best_match") or {}
         if best_match:
@@ -855,11 +1067,17 @@ def _show_report_summary(config: Dict[str, object]) -> None:
 
     if detection:
         selected = detection.get("selected_candidate_stream") or {}
+        support = detection.get("selected_protocol_support") or {}
         print(f"  {BOLD}Detection{RESET}")
         print(f"    Average Entropy  : {detection.get('average_entropy', '?')}")
         print(f"    Opaque Hits      : {detection.get('protocol_hits', {}).get('opaque', 0)}")
         print(f"    Selected Stream  : {_shorten(str(selected.get('stream_id') or '(none)'), 84)}")
         print(f"    Candidate Class  : {selected.get('candidate_class', '(none)')}")
+        if support:
+            print(
+                f"    Decode/Replay    : "
+                f"{support.get('decode_level', 'heuristic')} / {support.get('replay_level', 'unsupported')}"
+            )
     else:
         warn("No detection report found yet.")
 
@@ -867,12 +1085,16 @@ def _show_report_summary(config: Dict[str, object]) -> None:
         selected = analysis.get("selected_candidate_stream") or {}
         hypotheses = analysis.get("hypotheses", [])
         recommendations = analysis.get("recommendations", [])
+        feasibility = dict(analysis.get("feasibility") or {})
+        replay_feasibility = dict(feasibility.get("replay") or {})
         print(f"\n  {BOLD}Analysis{RESET}")
         print(f"    Units Analyzed   : {analysis.get('total_units', 0)}")
         print(f"    Chi-Squared      : {analysis.get('ciphertext_observations', {}).get('chi_squared', '?')}")
         print(f"    Selected Stream  : {_shorten(str(selected.get('stream_id') or '(none)'), 84)}")
         if hypotheses:
             print(f"    Top Hypothesis   : {hypotheses[0].get('name', '(none)')}")
+        if replay_feasibility:
+            print(f"    Preflight        : {replay_feasibility.get('status', 'blocked')}")
         if recommendations:
             print(f"    Recommendation   : {_shorten(str(recommendations[0]), 84)}")
         corpus = analysis.get("corpus") or {}
@@ -899,6 +1121,13 @@ def _show_candidate_streams(config: Dict[str, object], limit: int = 10) -> list[
         label = f"[{index}] {row['candidate_class']} score={row['score']} bytes={row['byte_count']}"
         print(f"  {CYAN}{label}{RESET}")
         print(f"      {_shorten(str(row['stream_id']), 88)}")
+        support = dict(row.get("protocol_support") or {})
+        if support:
+            print(
+                f"      support: decode={support.get('decode_level', 'heuristic')} "
+                f"replay={support.get('replay_level', 'unsupported')} "
+                f"type={support.get('dominant_unit_type', 'opaque_chunk')}"
+            )
         if row.get("reasons"):
             print(f"      {DIM}{_shorten('; '.join(row['reasons']), 88)}{RESET}")
     return rows
@@ -1035,7 +1264,10 @@ def run_detect(config: Dict[str, object], manifest_path: Optional[str] = None) -
 
 
 def run_analyze(config: Dict[str, object], decrypted_dir: Optional[str]) -> Optional[Dict[str, object]]:
-    return CryptoAnalyzer(config).analyze(decrypted_dir)
+    report = CryptoAnalyzer(config).analyze(decrypted_dir)
+    if not report:
+        return report
+    return attach_feasibility_to_report(config, report, _analysis_report_path(config))
 
 
 def run_play(config: Dict[str, object]) -> Optional[str]:
@@ -1043,10 +1275,27 @@ def run_play(config: Dict[str, object]) -> Optional[str]:
     if not report:
         err("No analysis report found. Run analyze first.")
         return None
+    feasibility = dict(report.get("feasibility") or evaluate_pipeline_feasibility(config, report))
+    replay_feasibility = dict(feasibility.get("replay") or {})
+    if replay_feasibility.get("status") == "blocked":
+        err(str(replay_feasibility.get("summary") or "Replay is blocked."))
+        for blocker in replay_feasibility.get("blockers", []):
+            err(str(blocker))
+        for step in replay_feasibility.get("next_steps", []):
+            info(f"Next: {step}")
+        return None
+    for warning in replay_feasibility.get("warnings", []):
+        warn(str(warning))
     candidate = dict(report.get("candidate_material") or {})
     if not candidate:
         err("The last analysis report did not produce any experimental replay material.")
         return None
+    support = replay_support_summary(report)
+    replay_level = str(support.get("replay_level") or "unsupported")
+    info(
+        f"Replay family support: {replay_level.replace('_', ' ')} "
+        f"for {support.get('dominant_unit_type') or 'selected stream'}."
+    )
     config_for_play = dict(config)
     config_for_play["replay_format_hint"] = infer_replay_hint(config, report)
     reconstructed = reconstruct_from_capture(config_for_play, report)
@@ -1121,7 +1370,10 @@ def interactive_menu(config: Dict[str, object]) -> int:
             "Launch web dashboard",                               # 21
             "Run doctor" + _command_support_suffix(config, "doctor"),                                         # 22
             _active_validation_label(config) + _command_support_suffix(config, _active_validation_command(config)),    # 23
-            "Exit",                                               # 24
+            "Show hardware qualification" + _command_support_suffix(config, "hardware"),                    # 24
+            "Run pipeline preflight" + _command_support_suffix(config, "preflight"),                       # 25
+            "Run release gate" + _command_support_suffix(config, "release-gate"),                         # 26
+            "Exit",                                               # 27
         ]
         if profile.key == "windows_remote" and not str(config.get("remote_host") or "").strip():
             default = 1
@@ -1152,7 +1404,29 @@ def interactive_menu(config: Dict[str, object]) -> int:
                 host = ask("Remote host (user@host)", str(config.get("remote_host") or ""))
                 identity = ask("SSH identity file (blank = auto)", str(config.get("remote_identity") or "")).strip() or None
                 install_packages = confirm("Install capture-side packages when possible?", default=True)
-                run_bootstrap_remote(config, host=host, identity=identity, install_packages=install_packages)
+                install_mode = ask(
+                    "Remote install mode (auto/native/bundle)",
+                    str(config.get("remote_install_mode") or "auto"),
+                ).strip().lower()
+                install_profile = ask(
+                    "Remote install profile (standard/appliance)",
+                    str(config.get("remote_install_profile") or "appliance"),
+                ).strip().lower()
+                health_port = None
+                if install_profile == "appliance":
+                    health_port = ask_int(
+                        "Appliance health port",
+                        int(config.get("remote_health_port", 8741) or 8741),
+                    )
+                run_bootstrap_remote(
+                    config,
+                    host=host,
+                    identity=identity,
+                    install_packages=install_packages,
+                    install_mode=install_mode,
+                    install_profile=install_profile,
+                    health_port=health_port,
+                )
         elif selection == 5:
             if _enforce_command_support(config, "start-remote"):
                 host = ask("Remote host (user@host)", str(config.get("remote_host") or ""))
@@ -1243,6 +1517,15 @@ def interactive_menu(config: Dict[str, object]) -> int:
                         host=str(config.get("remote_host") or "").strip() or None,
                         interface=str(config.get("remote_interface") or "").strip() or None,
                     )
+        elif selection == 24:
+            if _enforce_command_support(config, "hardware"):
+                run_hardware(config)
+        elif selection == 25:
+            if _enforce_command_support(config, "preflight"):
+                run_preflight(config)
+        elif selection == 26:
+            if _enforce_command_support(config, "release-gate"):
+                run_release_gate(config)
         else:
             info("Goodbye.")
             return 0
@@ -1284,6 +1567,8 @@ def build_parser() -> argparse.ArgumentParser:
     # ── WPA2 crack + decrypt ─────────────────────────────────────────────────
     crack_p = subparsers.add_parser("crack", help="Crack WPA2 PSK from a handshake capture then decrypt with airdecap-ng")
     crack_p.add_argument("--cap", default=None, help="Path to handshake .cap file (auto-detected if omitted)")
+    crack_status_p = subparsers.add_parser("crack-status", help="Inspect whether the current WPA crack/decrypt path is actually ready")
+    crack_status_p.add_argument("--cap", default=None, help="Path to handshake .cap file (auto-detected if omitted)")
 
     # ── Remote capture pull (SSH/SCP) ────────────────────────────────────────
     remote_p = subparsers.add_parser("remote", help="Pull a capture from an Ubuntu or Raspberry Pi OS capture device over SSH/SCP")
@@ -1302,12 +1587,21 @@ def build_parser() -> argparse.ArgumentParser:
     pair_p.add_argument("--port", default=None, type=int, help="SSH port (default: 22)")
     pair_p.add_argument("--identity", default=None, help="SSH identity file (private key or .pub)")
 
+    discover_p = subparsers.add_parser("discover-remote", help="Discover appliance-style capture nodes on the local network")
+    discover_p.add_argument("--network", action="append", default=None, help="CIDR block to scan, for example 192.168.1.0/24 (repeatable)")
+    discover_p.add_argument("--health-port", default=None, type=int, help="Health endpoint port (default: 8741)")
+    discover_p.add_argument("--timeout", default=0.35, type=float, help="Per-host HTTP timeout in seconds")
+    discover_p.add_argument("--max-hosts", default=64, type=int, help="Maximum IPs to probe across discovered networks")
+
     bootstrap_p = subparsers.add_parser("bootstrap-remote", help="Prepare an Ubuntu or Raspberry Pi OS remote capture device over SSH")
     bootstrap_p.add_argument("--host", default=None, help="Remote host in user@host form")
     bootstrap_p.add_argument("--port", default=None, type=int, help="SSH port (default: 22)")
     bootstrap_p.add_argument("--identity", default=None, help="SSH identity file (private key or .pub)")
     bootstrap_p.add_argument("--remote-root", default=None, help="Remote install root (default: $HOME/wifi-pipeline)")
     bootstrap_p.add_argument("--capture-dir", default=None, help="Remote capture directory (default: <remote-root>/captures)")
+    bootstrap_p.add_argument("--install-mode", default=None, choices=["auto", "native", "bundle"], help="Remote install mode (default: auto)")
+    bootstrap_p.add_argument("--install-profile", default=None, choices=["standard", "appliance"], help="Remote install profile (default: appliance)")
+    bootstrap_p.add_argument("--health-port", default=None, type=int, help="Health endpoint port for appliance installs (default: 8741)")
     bootstrap_p.add_argument("--skip-packages", action="store_true", help="Do not install capture-side packages")
     bootstrap_p.add_argument("--skip-pair", action="store_true", help="Skip SSH key pairing before bootstrap")
 
@@ -1317,6 +1611,9 @@ def build_parser() -> argparse.ArgumentParser:
     setup_remote_p.add_argument("--identity", default=None, help="SSH identity file (private key or .pub)")
     setup_remote_p.add_argument("--interface", default=None, help="Remote capture interface, for example wlan0")
     setup_remote_p.add_argument("--duration", default=None, type=int, help="Default capture duration in seconds")
+    setup_remote_p.add_argument("--install-mode", default=None, choices=["auto", "native", "bundle"], help="Bootstrap install mode for the remote device")
+    setup_remote_p.add_argument("--install-profile", default=None, choices=["standard", "appliance"], help="Bootstrap install profile for the remote device")
+    setup_remote_p.add_argument("--health-port", default=None, type=int, help="Health endpoint port for appliance installs")
     setup_remote_p.add_argument("--dest", default=None, help="Local destination directory")
     setup_remote_p.add_argument("--smoke-test", action="store_true", help="Run a short remote smoke capture after setup")
 
@@ -1381,7 +1678,15 @@ def build_parser() -> argparse.ArgumentParser:
     web_p.add_argument("--port", default=DEFAULT_WEB_PORT, type=int)
     web_p.add_argument("--no-browser", action="store_true")
 
-    subparsers.add_parser("deps", help="Check the environment, official product modes, and explicit product limits")
+    subparsers.add_parser("deps", help="Check the environment, workflow support tiers, hardware qualification, official modes, and product limits")
+    subparsers.add_parser("hardware", help="Show the supported hardware qualification report for this machine")
+    subparsers.add_parser("preflight", help="Fail early with exact replay/WPA reasons before long-running decode or replay work")
+    release_gate_p = subparsers.add_parser("release-gate", help="Require the real validation matrix and sample analysis reports before calling a release fully validated")
+    release_gate_p.add_argument("--ubuntu-report", default=None, help="Path to the Ubuntu standalone validation report")
+    release_gate_p.add_argument("--pi-report", default=None, help="Path to the Raspberry Pi OS standalone validation report")
+    release_gate_p.add_argument("--windows-report", default=None, help="Path to the Windows remote validation report")
+    release_gate_p.add_argument("--sample-report", action="append", default=None, help="Path to an analysis report from a supported decode/replay sample set (repeatable)")
+    release_gate_p.add_argument("--write-summary", default=None, help="Optional path to write the computed release-gate summary JSON")
 
     doctor_p = subparsers.add_parser("doctor", help="Check local tools and optional remote capture setup")
     doctor_p.add_argument("--host", default=None, help="Remote host in user@host form")
@@ -1430,7 +1735,23 @@ def main(argv: Optional[list] = None) -> int:
         return 1
 
     if args.command == "deps":
-        return 0 if check_environment() else 1
+        return 0 if check_environment(config) else 1
+
+    if args.command == "hardware":
+        return 0 if run_hardware(config) else 1
+
+    if args.command == "preflight":
+        return 0 if run_preflight(config) else 1
+
+    if args.command == "release-gate":
+        return 0 if run_release_gate(
+            config,
+            ubuntu_report=getattr(args, "ubuntu_report", None),
+            pi_report=getattr(args, "pi_report", None),
+            windows_report=getattr(args, "windows_report", None),
+            sample_reports=list(getattr(args, "sample_report", None) or []),
+            write_summary=getattr(args, "write_summary", None),
+        ) else 1
 
     if args.command == "doctor":
         return 0 if run_doctor(
@@ -1466,6 +1787,9 @@ def main(argv: Optional[list] = None) -> int:
             done(f"Decrypted pcap: {result}")
         return 0 if result else 1
 
+    if args.command == "crack-status":
+        return 0 if run_crack_status(config, handshake_cap=getattr(args, "cap", None)) else 1
+
     if args.command == "wifi":
         method = getattr(args, "method", None) or str(config.get("monitor_method") or "airodump")
         decrypted_dir = getattr(args, "decrypted", None)
@@ -1499,6 +1823,16 @@ def main(argv: Optional[list] = None) -> int:
             _run_after_pull(config, str(pulled), str(getattr(args, "run", "none")))
         return 0 if pulled else 1
 
+    if args.command == "discover-remote":
+        results = run_discover_remote(
+            config,
+            networks=list(getattr(args, "network", None) or []),
+            health_port=getattr(args, "health_port", None),
+            timeout=float(getattr(args, "timeout", 0.35) or 0.35),
+            max_hosts=int(getattr(args, "max_hosts", 64) or 64),
+        )
+        return 0 if results else 1
+
     if args.command == "pair-remote":
         paired = run_pair_remote(
             config,
@@ -1517,6 +1851,9 @@ def main(argv: Optional[list] = None) -> int:
             remote_root=getattr(args, "remote_root", None),
             capture_dir=getattr(args, "capture_dir", None),
             install_packages=not bool(getattr(args, "skip_packages", False)),
+            install_mode=getattr(args, "install_mode", None),
+            install_profile=getattr(args, "install_profile", None),
+            health_port=getattr(args, "health_port", None),
             pair=not bool(getattr(args, "skip_pair", False)),
         )
         return 0 if result else 1
@@ -1531,6 +1868,9 @@ def main(argv: Optional[list] = None) -> int:
             interface=getattr(args, "interface", None),
             dest_dir=getattr(args, "dest", None),
             duration=getattr(args, "duration", None),
+            install_mode=getattr(args, "install_mode", None),
+            install_profile=getattr(args, "install_profile", None),
+            health_port=getattr(args, "health_port", None),
             smoke_test=bool(getattr(args, "smoke_test", False)),
         )
         return 0 if result else 1

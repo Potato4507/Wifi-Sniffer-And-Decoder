@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from .protocols import strip_rtp_header, suggested_extension
+from .protocols import strip_rtp_header, suggested_extension, summarize_stream_support
 from .ui import done, err, info, ok, section, warn
 
 FFPLAY_FORMATS = {
@@ -187,6 +187,10 @@ def infer_replay_hint(config: Dict[str, object], report: Dict[str, object]) -> s
     if configured not in ("", "auto", "raw"):
         return configured
     selected_stream = dict(report.get("selected_candidate_stream") or {})
+    support = dict(report.get("selected_protocol_support") or summarize_stream_support(dict(selected_stream.get("unit_type_counts") or {})))
+    support_hint = str(support.get("replay_hint") or "").strip().lower()
+    if support_hint and support_hint != "raw":
+        return support_hint
     dominant = _dominant_unit_type(selected_stream)
     mapping = {
         "plain_text": "txt",
@@ -215,10 +219,32 @@ def infer_replay_hint(config: Dict[str, object], report: Dict[str, object]) -> s
     return mapping.get(dominant, "raw")
 
 
+def replay_support_summary(report: Dict[str, object]) -> Dict[str, object]:
+    selected_stream = dict(report.get("selected_candidate_stream") or {})
+    support = dict(report.get("selected_protocol_support") or summarize_stream_support(dict(selected_stream.get("unit_type_counts") or {})))
+    if not support:
+        support = summarize_stream_support({})
+    return support
+
+
 def reconstruct_from_capture(config: Dict[str, object], report: Dict[str, object]) -> Optional[str]:
     candidate_material = dict(report.get("candidate_material") or {})
     if not candidate_material:
         return None
+
+    support = replay_support_summary(report)
+    replay_level = str(support.get("replay_level") or "unsupported")
+    if replay_level == "unsupported":
+        err("The selected stream does not belong to a supported replay family.")
+        warn(str(support.get("detail") or "Replay stays unsupported for this protocol family."))
+        return None
+    if replay_level == "heuristic":
+        warn(str(support.get("detail") or "Replay remains heuristic for this protocol family."))
+    else:
+        info(
+            f"Replay family support: {replay_level.replace('_', ' ')} "
+            f"for {support.get('dominant_unit_type') or 'selected stream'}."
+        )
 
     manifest_path = Path(str(config.get("output_dir") or "./pipeline_output")).resolve() / "manifest.json"
     manifest = _load_json(manifest_path)

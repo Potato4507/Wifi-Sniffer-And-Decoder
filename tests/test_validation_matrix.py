@@ -47,7 +47,7 @@ def test_simulated_step6_linux_validation_matrix(
     capture_path.write_bytes(b"pcap")
     report_path = tmp_path / f"{distro_id}-validation.json"
 
-    monkeypatch.setattr(cli, "check_environment", lambda: True)
+    monkeypatch.setattr(cli, "check_environment", lambda config=None: True)
     monkeypatch.setattr(cli, "list_interfaces", lambda: [("1", "wlan0", "wireless")])
     monkeypatch.setattr(cli, "run_capture", lambda config, strip_wifi=False: str(capture_path))
     monkeypatch.setattr(cli, "run_extract", lambda config, pcap: {"streams": 1})
@@ -83,7 +83,7 @@ def test_simulated_step6_windows_remote_validation_matrix(monkeypatch, tmp_path:
     capture_path.write_bytes(b"pcap")
     report_path = tmp_path / "remote-validation.json"
 
-    monkeypatch.setattr(cli, "check_environment", lambda: True)
+    monkeypatch.setattr(cli, "check_environment", lambda config=None: True)
     monkeypatch.setattr(
         cli,
         "doctor_remote_host",

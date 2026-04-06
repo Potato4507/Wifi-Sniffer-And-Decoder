@@ -1,15 +1,25 @@
 from __future__ import annotations
 
+import concurrent.futures
 import hashlib
+import ipaddress
+import io
+import json
 import os
 import shlex
 import shutil
+import socket
 import subprocess
+import tarfile
+import tempfile
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from . import __version__
 from .ui import done, err, info, ok, section, warn
 
 
@@ -21,6 +31,21 @@ class RemoteSource:
     identity: str
     dest_dir: Path
     poll_interval: int
+
+
+REMOTE_INSTALL_MODES = ("auto", "native", "bundle")
+REMOTE_INSTALL_PROFILES = ("standard", "appliance")
+DEFAULT_APPLIANCE_HEALTH_PORT = 8741
+DEFAULT_DISCOVERY_TIMEOUT = 0.35
+DEFAULT_DISCOVERY_HOST_LIMIT = 64
+DEFAULT_DISCOVERY_HOSTNAMES = (
+    "raspberrypi",
+    "raspberrypi.local",
+    "wifi-pipeline",
+    "wifi-pipeline.local",
+    "ubuntu",
+    "ubuntu.local",
+)
 
 
 def _run_remote(
@@ -42,6 +67,150 @@ def _run_remote(
 
 def _has_ssh_tools() -> bool:
     return bool(shutil.which("ssh")) and bool(shutil.which("scp"))
+
+
+def _strip_ssh_user(host: str) -> str:
+    value = str(host or "").strip()
+    if "@" in value:
+        return value.split("@", 1)[1].strip()
+    return value
+
+
+def _preferred_discovery_user(config: Dict[str, object]) -> str:
+    host = str(config.get("remote_host") or "").strip()
+    if "@" in host:
+        return host.split("@", 1)[0].strip()
+    return str(config.get("remote_user") or "").strip()
+
+
+def _candidate_discovery_networks() -> List[str]:
+    networks: set[str] = set()
+    try:
+        host_info = socket.getaddrinfo(socket.gethostname(), None, family=socket.AF_INET, type=socket.SOCK_DGRAM)
+        for entry in host_info:
+            address = entry[4][0]
+            if address.startswith("127.") or address.startswith("169.254."):
+                continue
+            network = ipaddress.ip_network(f"{address}/24", strict=False)
+            networks.add(str(network))
+    except OSError:
+        pass
+
+    for target in ("8.8.8.8", "1.1.1.1"):
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.connect((target, 53))
+                address = sock.getsockname()[0]
+            if address and not address.startswith("127.") and not address.startswith("169.254."):
+                networks.add(str(ipaddress.ip_network(f"{address}/24", strict=False)))
+        except OSError:
+            continue
+
+    return sorted(networks)
+
+
+def _candidate_discovery_hosts(
+    config: Dict[str, object],
+    *,
+    networks: Optional[List[str]] = None,
+    max_hosts: int = DEFAULT_DISCOVERY_HOST_LIMIT,
+) -> List[str]:
+    hosts: List[str] = []
+    seen: set[str] = set()
+
+    def add_host(value: str) -> None:
+        candidate = _strip_ssh_user(value)
+        if not candidate or candidate in seen:
+            return
+        seen.add(candidate)
+        hosts.append(candidate)
+
+    add_host(str(config.get("remote_host") or ""))
+    for candidate in DEFAULT_DISCOVERY_HOSTNAMES:
+        add_host(candidate)
+
+    discovered_networks = networks or _candidate_discovery_networks()
+    remaining = max(0, int(max_hosts))
+    for network_text in discovered_networks:
+        if remaining <= 0:
+            break
+        try:
+            network = ipaddress.ip_network(network_text, strict=False)
+        except ValueError:
+            continue
+        for address in network.hosts():
+            add_host(str(address))
+            remaining -= 1
+            if remaining <= 0:
+                break
+
+    return hosts
+
+
+def _probe_remote_appliance(host: str, *, health_port: int, timeout: float, user_hint: str = "") -> Optional[Dict[str, str]]:
+    endpoint = f"http://{host}:{int(health_port)}/health"
+    try:
+        with urllib.request.urlopen(endpoint, timeout=max(0.1, float(timeout))) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (OSError, ValueError, urllib.error.URLError, TimeoutError):
+        return None
+
+    if not isinstance(payload, dict):
+        return None
+    if str(payload.get("protocol") or "") != "capture-agent/v1":
+        return None
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        return None
+    if str(data.get("agent") or "") != "yes":
+        return None
+
+    ssh_user = str(data.get("ssh_user") or user_hint or "").strip()
+    ssh_target = f"{ssh_user}@{host}" if ssh_user else host
+    return {
+        "host": host,
+        "ssh_target": ssh_target,
+        "health_endpoint": endpoint,
+        "device_name": str(data.get("device_name") or host),
+        "install_profile": str(data.get("install_profile") or "standard"),
+        "health_port": str(data.get("health_port") or health_port),
+        "health_path": str(data.get("health_path") or "/health"),
+        "control_mode": str(data.get("control_mode") or "agent"),
+        "agent_protocol": str(payload.get("protocol") or ""),
+        "capture_dir": str(data.get("capture_dir") or ""),
+        "service_status": str(data.get("service_status") or ""),
+        "ssh_user": ssh_user,
+    }
+
+
+def discover_remote_appliances(
+    config: Dict[str, object],
+    *,
+    networks: Optional[List[str]] = None,
+    health_port: Optional[int] = None,
+    timeout: float = DEFAULT_DISCOVERY_TIMEOUT,
+    max_hosts: int = DEFAULT_DISCOVERY_HOST_LIMIT,
+) -> List[Dict[str, str]]:
+    chosen_port = int(health_port if health_port is not None else config.get("remote_health_port", DEFAULT_APPLIANCE_HEALTH_PORT) or DEFAULT_APPLIANCE_HEALTH_PORT)
+    user_hint = _preferred_discovery_user(config)
+    candidates = _candidate_discovery_hosts(config, networks=networks, max_hosts=max_hosts)
+    results: List[Dict[str, str]] = []
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(32, max(4, len(candidates) or 1))) as executor:
+        future_map = {
+            executor.submit(_probe_remote_appliance, host, health_port=chosen_port, timeout=timeout, user_hint=user_hint): host
+            for host in candidates
+        }
+        for future in concurrent.futures.as_completed(future_map):
+            try:
+                record = future.result()
+            except Exception:
+                record = None
+            if record:
+                results.append(record)
+
+    results.sort(key=lambda item: (item.get("device_name") or item.get("host") or "", item.get("host") or ""))
+    return results
 
 
 def _is_pattern(path: str) -> bool:
@@ -638,15 +807,379 @@ esac
 """
 
 
-def _bootstrap_remote_script(remote_root: str, capture_dir: str, install_packages: bool = True) -> str:
+def _capture_agent_script(remote_root: str, capture_dir: str) -> str:
     quoted_remote_root = shlex.quote(remote_root)
     quoted_capture_dir = shlex.quote(capture_dir)
-    helper_script = _capture_helper_script(capture_dir)
-    runner_script = _privileged_capture_runner_script(capture_dir)
-    service_script = _capture_service_script(remote_root, capture_dir)
-    install_block = ""
-    if install_packages:
-        install_block = """
+    return f"""#!/usr/bin/env bash
+set -euo pipefail
+
+PROTOCOL="capture-agent/v1"
+REMOTE_ROOT={quoted_remote_root}
+CAPTURE_DIR={quoted_capture_dir}
+STATE_DIR="$REMOTE_ROOT/state"
+LOCAL_BIN="$HOME/.local/bin"
+LOCAL_HELPER="$LOCAL_BIN/wifi-pipeline-capture"
+HELPER="$REMOTE_ROOT/bin/wifi-pipeline-capture"
+LOCAL_SERVICE="$LOCAL_BIN/wifi-pipeline-service"
+SERVICE="$REMOTE_ROOT/bin/wifi-pipeline-service"
+PRIVILEGED_RUNNER="/usr/local/bin/wifi-pipeline-capture-privileged"
+
+json_escape() {{
+    printf '%s' "$1" | sed ':a;N;$!ba;s/\\/\\\\/g;s/"/\\"/g;s/\t/\\\\t/g;s/\r/\\\\r/g;s/\n/\\\\n/g'
+}}
+
+yes_no() {{
+    if [[ "$1" == "0" ]]; then
+        printf 'yes'
+    else
+        printf 'no'
+    fi
+}}
+
+preferred_path() {{
+    local local_path="$1"
+    local fallback_path="$2"
+    if [[ -x "$local_path" ]]; then
+        printf '%s\\n' "$local_path"
+    else
+        printf '%s\\n' "$fallback_path"
+    fi
+}}
+
+kv_to_json() {{
+    local input_file="$1"
+    local first=1
+    printf '{{'
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ "$line" == *=* ]] || continue
+        local key="${{line%%=*}}"
+        local value="${{line#*=}}"
+        if [[ $first -eq 0 ]]; then
+            printf ','
+        fi
+        first=0
+        printf '"%s":"%s"' "$(json_escape "$key")" "$(json_escape "$value")"
+    done < "$input_file"
+    printf '}}'
+}}
+
+emit_json() {{
+    local ok="$1"
+    local returncode="$2"
+    local data_file="$3"
+    local error_message="${{4:-}}"
+    local stdout_value="${{5:-}}"
+    local stderr_value="${{6:-}}"
+    printf '{{"ok":%s,"protocol":"%s","returncode":%s,"data":' "$ok" "$PROTOCOL" "$returncode"
+    kv_to_json "$data_file"
+    if [[ -n "$error_message" ]]; then
+        printf ',"error":"%s"' "$(json_escape "$error_message")"
+    fi
+    if [[ -n "$stdout_value" ]]; then
+        printf ',"stdout":"%s"' "$(json_escape "$stdout_value")"
+    fi
+    if [[ -n "$stderr_value" ]]; then
+        printf ',"stderr":"%s"' "$(json_escape "$stderr_value")"
+    fi
+    printf '}}\\n'
+}}
+
+artifact_info() {{
+    local path="$1"
+    local marker_path="${{path}}.complete"
+    local checksum_path="${{path}}.sha256"
+    if [[ -f "$path" ]]; then
+        echo "file_exists=yes"
+    else
+        echo "file_exists=no"
+        return 0
+    fi
+    if [[ -f "$marker_path" ]]; then
+        echo "complete_marker=yes"
+    else
+        echo "complete_marker=no"
+    fi
+    if [[ -f "$checksum_path" ]]; then
+        echo "checksum_file=yes"
+        printf 'checksum_value=%s\\n' "$(tr -d '[:space:]' < "$checksum_path")"
+    else
+        echo "checksum_file=no"
+    fi
+    printf 'remote_size_bytes=%s\\n' "$(wc -c < "$path" | tr -d ' ')"
+}}
+
+detect_privilege_mode() {{
+    if [[ "$(id -u)" -eq 0 ]]; then
+        printf 'root_session\\n'
+    elif command -v sudo >/dev/null 2>&1 && [[ -x "$PRIVILEGED_RUNNER" ]] && sudo -n "$PRIVILEGED_RUNNER" --help >/dev/null 2>&1; then
+        printf 'sudoers_runner\\n'
+    else
+        printf 'fallback\\n'
+    fi
+}}
+
+detect_interface() {{
+    local interface_name="$1"
+    if [[ -e "/sys/class/net/$interface_name" ]]; then
+        printf 'yes\\n'
+    elif command -v ip >/dev/null 2>&1; then
+        if ip link show "$interface_name" >/dev/null 2>&1; then
+            printf 'yes\\n'
+        else
+            printf 'no\\n'
+        fi
+    elif command -v ifconfig >/dev/null 2>&1; then
+        if ifconfig "$interface_name" >/dev/null 2>&1; then
+            printf 'yes\\n'
+        else
+            printf 'no\\n'
+        fi
+    else
+        printf 'unknown\\n'
+    fi
+}}
+
+run_service() {{
+    local action="$1"
+    shift
+    local service_path
+    service_path="$(preferred_path "$LOCAL_SERVICE" "$SERVICE")"
+    local data_file stdout_file stderr_file
+    data_file="$(mktemp)"
+    stdout_file="$(mktemp)"
+    stderr_file="$(mktemp)"
+    if [[ ! -x "$service_path" ]]; then
+        emit_json false 1 "$data_file" "missing_service" "" "Remote capture service not found."
+        rm -f "$data_file" "$stdout_file" "$stderr_file"
+        return 1
+    fi
+    set +e
+    "$service_path" "$action" "$@" >"$stdout_file" 2>"$stderr_file"
+    local rc=$?
+    set -e
+    cp "$stdout_file" "$data_file"
+    emit_json "$([[ $rc -eq 0 ]] && printf true || printf false)" "$rc" "$data_file" "$([[ $rc -eq 0 ]] && printf '' || printf 'service_failed')" "$(cat "$stdout_file")" "$(cat "$stderr_file")"
+    rm -f "$data_file" "$stdout_file" "$stderr_file"
+    return "$rc"
+}}
+
+run_doctor() {{
+    local interface_name="${{1:-}}"
+    local helper_path service_path data_file status_file appliance_env
+    helper_path="$(preferred_path "$LOCAL_HELPER" "$HELPER")"
+    service_path="$(preferred_path "$LOCAL_SERVICE" "$SERVICE")"
+    appliance_env="$STATE_DIR/appliance.env"
+    data_file="$(mktemp)"
+    status_file="$(mktemp)"
+    printf 'tcpdump=%s\\n' "$(yes_no "$([[ -n "$(command -v tcpdump 2>/dev/null)" ]] && printf 0 || printf 1)")" > "$data_file"
+    printf 'helper=%s\\n' "$(yes_no "$([[ -x "$helper_path" ]] && printf 0 || printf 1)")" >> "$data_file"
+    printf 'helper_path=%s\\n' "$helper_path" >> "$data_file"
+    printf 'service=%s\\n' "$(yes_no "$([[ -x "$service_path" ]] && printf 0 || printf 1)")" >> "$data_file"
+    printf 'service_path=%s\\n' "$service_path" >> "$data_file"
+    printf 'privileged_runner=%s\\n' "$(yes_no "$([[ -x "$PRIVILEGED_RUNNER" ]] && printf 0 || printf 1)")" >> "$data_file"
+    printf 'privileged_runner_path=%s\\n' "$PRIVILEGED_RUNNER" >> "$data_file"
+    printf 'privilege_mode=%s\\n' "$(detect_privilege_mode)" >> "$data_file"
+    printf 'state_dir=%s\\n' "$STATE_DIR" >> "$data_file"
+    printf 'state_dir_exists=%s\\n' "$(yes_no "$([[ -d "$STATE_DIR" ]] && printf 0 || printf 1)")" >> "$data_file"
+    printf 'state_dir_writable=%s\\n' "$(yes_no "$([[ -w "$STATE_DIR" ]] && printf 0 || printf 1)")" >> "$data_file"
+    printf 'capture_dir=%s\\n' "$CAPTURE_DIR" >> "$data_file"
+    printf 'capture_dir_exists=%s\\n' "$(yes_no "$([[ -d "$CAPTURE_DIR" ]] && printf 0 || printf 1)")" >> "$data_file"
+    printf 'capture_dir_writable=%s\\n' "$(yes_no "$([[ -w "$CAPTURE_DIR" ]] && printf 0 || printf 1)")" >> "$data_file"
+    printf 'agent=yes\\n' >> "$data_file"
+    printf 'agent_path=%s\\n' "$0" >> "$data_file"
+    printf 'agent_protocol=%s\\n' "$PROTOCOL" >> "$data_file"
+    printf 'control_mode=agent\\n' >> "$data_file"
+    if [[ -f "$appliance_env" ]]; then
+        cat "$appliance_env" >> "$data_file"
+    else
+        printf 'install_profile=standard\\n' >> "$data_file"
+    fi
+    if [[ -x "$service_path" ]]; then
+        set +e
+        "$service_path" status >"$status_file" 2>/dev/null
+        set -e
+        cat "$status_file" >> "$data_file"
+    else
+        printf 'service_status=missing\\n' >> "$data_file"
+    fi
+    local last_capture=""
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        if [[ "$line" == last_capture=* ]]; then
+            last_capture="${{line#*=}}"
+        elif [[ -z "$last_capture" && "$line" == output=* ]]; then
+            last_capture="${{line#*=}}"
+        fi
+    done < "$data_file"
+    if [[ -n "$last_capture" ]]; then
+        artifact_info "$last_capture" >> "$data_file"
+    fi
+    if command -v systemctl >/dev/null 2>&1; then
+        if systemctl is-enabled wifi-pipeline-appliance.service >/dev/null 2>&1; then
+            printf 'appliance_service_enabled=yes\\n' >> "$data_file"
+        else
+            printf 'appliance_service_enabled=no\\n' >> "$data_file"
+        fi
+        if systemctl is-active wifi-pipeline-appliance.service >/dev/null 2>&1; then
+            printf 'appliance_service_active=yes\\n' >> "$data_file"
+        else
+            printf 'appliance_service_active=no\\n' >> "$data_file"
+        fi
+        if systemctl is-enabled wifi-pipeline-health.socket >/dev/null 2>&1; then
+            printf 'health_socket_enabled=yes\\n' >> "$data_file"
+        else
+            printf 'health_socket_enabled=no\\n' >> "$data_file"
+        fi
+        if systemctl is-active wifi-pipeline-health.socket >/dev/null 2>&1; then
+            printf 'health_socket_active=yes\\n' >> "$data_file"
+        else
+            printf 'health_socket_active=no\\n' >> "$data_file"
+        fi
+    else
+        printf 'appliance_service_enabled=unknown\\n' >> "$data_file"
+        printf 'appliance_service_active=unknown\\n' >> "$data_file"
+        printf 'health_socket_enabled=unknown\\n' >> "$data_file"
+        printf 'health_socket_active=unknown\\n' >> "$data_file"
+    fi
+    if [[ -n "$interface_name" ]]; then
+        printf 'interface_exists=%s\\n' "$(detect_interface "$interface_name")" >> "$data_file"
+    fi
+    emit_json true 0 "$data_file"
+    rm -f "$data_file" "$status_file"
+}}
+
+run_artifact_info() {{
+    local path="$1"
+    local data_file
+    data_file="$(mktemp)"
+    artifact_info "$path" > "$data_file"
+    emit_json true 0 "$data_file"
+    rm -f "$data_file"
+}}
+
+COMMAND="${{1:-}}"
+if [[ $# -gt 0 ]]; then
+    shift
+fi
+
+case "$COMMAND" in
+    service)
+        ACTION="${{1:-status}}"
+        if [[ $# -gt 0 ]]; then
+            shift
+        fi
+        run_service "$ACTION" "$@"
+        ;;
+    doctor)
+        INTERFACE=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --interface)
+                    INTERFACE="${{2:-}}"
+                    shift 2
+                    ;;
+                *)
+                    echo "unknown argument: $1" >&2
+                    exit 1
+                    ;;
+            esac
+        done
+        run_doctor "$INTERFACE"
+        ;;
+    artifact-info)
+        PATH_VALUE=""
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --path)
+                    PATH_VALUE="${{2:-}}"
+                    shift 2
+                    ;;
+                *)
+                    echo "unknown argument: $1" >&2
+                    exit 1
+                    ;;
+            esac
+        done
+        if [[ -z "$PATH_VALUE" ]]; then
+            echo "artifact-info requires --path" >&2
+            exit 1
+        fi
+        run_artifact_info "$PATH_VALUE"
+        ;;
+    *)
+        echo "Usage: wifi-pipeline-agent <service|doctor|artifact-info> [...]" >&2
+        exit 1
+        ;;
+esac
+"""
+
+
+def build_capture_agent_bundle(
+    output_dir: Optional[Path | str] = None,
+    *,
+    remote_root: str = "/opt/wifi-pipeline",
+    capture_dir: Optional[str] = None,
+) -> Path:
+    bundle_capture_dir = capture_dir or f"{remote_root.rstrip('/')}/captures"
+    destination_dir = Path(output_dir).resolve() if output_dir else (Path.cwd() / "dist").resolve()
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    bundle_name = f"wifi-pipeline-agent-{__version__}-bundle.tar.gz"
+    bundle_path = destination_dir / bundle_name
+
+    members = {
+        "manifest.json": json.dumps(
+            {
+                "version": __version__,
+                "kind": "wifi-pipeline-agent-bundle",
+                "remote_root": remote_root,
+                "capture_dir": bundle_capture_dir,
+                "files": [
+                    "install.sh",
+                    "bin/wifi-pipeline-agent",
+                    "bin/wifi-pipeline-capture",
+                    "bin/wifi-pipeline-service",
+                ],
+            },
+            indent=2,
+        )
+        + "\n",
+        "bin/wifi-pipeline-agent": _capture_agent_script(remote_root, bundle_capture_dir),
+        "bin/wifi-pipeline-capture": _capture_helper_script(bundle_capture_dir),
+        "bin/wifi-pipeline-service": _capture_service_script(remote_root, bundle_capture_dir),
+        "install.sh": (
+            "#!/usr/bin/env bash\n"
+            "set -euo pipefail\n"
+            f"REMOTE_ROOT={shlex.quote(remote_root)}\n"
+            'BIN_DIR="$REMOTE_ROOT/bin"\n'
+            'STATE_DIR="$REMOTE_ROOT/state"\n'
+            'LOCAL_BIN="$HOME/.local/bin"\n'
+            'mkdir -p "$BIN_DIR" "$STATE_DIR" "$LOCAL_BIN"\n'
+            'install -m 755 bin/wifi-pipeline-agent "$BIN_DIR/wifi-pipeline-agent"\n'
+            'install -m 755 bin/wifi-pipeline-capture "$BIN_DIR/wifi-pipeline-capture"\n'
+            'install -m 755 bin/wifi-pipeline-service "$BIN_DIR/wifi-pipeline-service"\n'
+            'ln -sf "$BIN_DIR/wifi-pipeline-agent" "$LOCAL_BIN/wifi-pipeline-agent"\n'
+            'ln -sf "$BIN_DIR/wifi-pipeline-capture" "$LOCAL_BIN/wifi-pipeline-capture"\n'
+            'ln -sf "$BIN_DIR/wifi-pipeline-service" "$LOCAL_BIN/wifi-pipeline-service"\n'
+            'printf "remote_root=%s\\n" "$REMOTE_ROOT"\n'
+            f'printf "capture_dir=%s\\n" {shlex.quote(bundle_capture_dir)}\n'
+            'printf "agent_cmd=%s\\n" "$BIN_DIR/wifi-pipeline-agent"\n'
+            'printf "capture_cmd=%s\\n" "$BIN_DIR/wifi-pipeline-capture"\n'
+            'printf "service_cmd=%s\\n" "$BIN_DIR/wifi-pipeline-service"\n'
+        ),
+    }
+
+    with tarfile.open(bundle_path, "w:gz") as archive:
+        for name, content in members.items():
+            data = content.encode("utf-8")
+            info_obj = tarfile.TarInfo(name)
+            info_obj.size = len(data)
+            info_obj.mode = 0o755 if name.startswith("bin/") or name == "install.sh" else 0o644
+            archive.addfile(info_obj, io.BytesIO(data))
+
+    return bundle_path
+
+
+def _package_install_block() -> str:
+    return """
 install_packages() {
     if [ "$(id -u)" -eq 0 ]; then
         SUDO=""
@@ -678,6 +1211,13 @@ install_packages() {
 }
 install_packages
 """
+
+
+def _post_install_setup_script(remote_root: str, capture_dir: str, install_packages: bool = True) -> str:
+    quoted_remote_root = shlex.quote(remote_root)
+    quoted_capture_dir = shlex.quote(capture_dir)
+    runner_script = _privileged_capture_runner_script(capture_dir)
+    install_block = _package_install_block() if install_packages else ""
     return f"""set -eu
 
 REMOTE_ROOT={quoted_remote_root}
@@ -686,6 +1226,319 @@ BIN_DIR="$REMOTE_ROOT/bin"
 STATE_DIR="$REMOTE_ROOT/state"
 HELPER="$BIN_DIR/wifi-pipeline-capture"
 SERVICE="$BIN_DIR/wifi-pipeline-service"
+AGENT="$BIN_DIR/wifi-pipeline-agent"
+PRIVILEGED_RUNNER="/usr/local/bin/wifi-pipeline-capture-privileged"
+SUDOERS_FILE="/etc/sudoers.d/wifi-pipeline-capture"
+LOCAL_BIN="$HOME/.local/bin"
+PRIVILEGE_MODE="fallback"
+
+{install_block}
+
+setup_privileged_runner() {{
+    if [ "$(id -u)" -eq 0 ]; then
+        SUDO=""
+    elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+        SUDO="sudo -n"
+    else
+        echo "[!] passwordless sudo not available; leaving capture privileges in fallback mode."
+        return 0
+    fi
+
+    CURRENT_USER="$(id -un)"
+    $SUDO mkdir -p /usr/local/bin /etc/sudoers.d
+    cat <<'EOF_RUNNER' | $SUDO tee "$PRIVILEGED_RUNNER" >/dev/null
+{runner_script}EOF_RUNNER
+    $SUDO chmod 755 "$PRIVILEGED_RUNNER"
+    $SUDO chown root:root "$PRIVILEGED_RUNNER" >/dev/null 2>&1 || true
+    printf '%s ALL=(root) NOPASSWD: %s\\n' "$CURRENT_USER" "$PRIVILEGED_RUNNER" | $SUDO tee "$SUDOERS_FILE" >/dev/null
+    $SUDO chmod 440 "$SUDOERS_FILE"
+    if command -v visudo >/dev/null 2>&1; then
+        if ! $SUDO visudo -cf "$SUDOERS_FILE" >/dev/null; then
+            echo "[!] sudoers validation failed; removing privileged runner access."
+            $SUDO rm -f "$SUDOERS_FILE"
+            return 0
+        fi
+    fi
+    if $SUDO "$PRIVILEGED_RUNNER" --help >/dev/null 2>&1; then
+        PRIVILEGE_MODE="sudoers_runner"
+    fi
+}}
+
+mkdir -p "$REMOTE_ROOT" "$CAPTURE_DIR" "$BIN_DIR" "$LOCAL_BIN" "$STATE_DIR"
+ln -sf "$AGENT" "$LOCAL_BIN/wifi-pipeline-agent"
+ln -sf "$HELPER" "$LOCAL_BIN/wifi-pipeline-capture"
+ln -sf "$SERVICE" "$LOCAL_BIN/wifi-pipeline-service"
+setup_privileged_runner
+
+printf 'remote_root=%s\\n' "$REMOTE_ROOT"
+printf 'capture_dir=%s\\n' "$CAPTURE_DIR"
+printf 'state_dir=%s\\n' "$STATE_DIR"
+printf 'agent_cmd=%s\\n' "$AGENT"
+printf 'capture_cmd=%s\\n' "$HELPER"
+printf 'service_cmd=%s\\n' "$SERVICE"
+printf 'privilege_mode=%s\\n' "$PRIVILEGE_MODE"
+printf 'privileged_runner=%s\\n' "$PRIVILEGED_RUNNER"
+"""
+
+
+def _appliance_profile_script(remote_root: str, capture_dir: str, health_port: int = DEFAULT_APPLIANCE_HEALTH_PORT) -> str:
+    quoted_remote_root = shlex.quote(remote_root)
+    quoted_capture_dir = shlex.quote(capture_dir)
+    quoted_health_port = int(health_port)
+    return f"""set -eu
+
+REMOTE_ROOT={quoted_remote_root}
+CAPTURE_DIR={quoted_capture_dir}
+STATE_DIR="$REMOTE_ROOT/state"
+BIN_DIR="$REMOTE_ROOT/bin"
+LOCAL_BIN="$HOME/.local/bin"
+AGENT="$BIN_DIR/wifi-pipeline-agent"
+HEALTH_SCRIPT="$BIN_DIR/wifi-pipeline-health-http"
+APPLIANCE_ENV="$STATE_DIR/appliance.env"
+HEALTH_PORT={quoted_health_port}
+HEALTH_SERVICE_NAME="wifi-pipeline-health.service"
+HEALTH_SOCKET_NAME="wifi-pipeline-health.socket"
+APPLIANCE_SERVICE_NAME="wifi-pipeline-appliance.service"
+SYSTEMD_DIR="/etc/systemd/system"
+HEALTH_SERVICE_PATH="$SYSTEMD_DIR/$HEALTH_SERVICE_NAME"
+HEALTH_SOCKET_PATH="$SYSTEMD_DIR/$HEALTH_SOCKET_NAME"
+APPLIANCE_SERVICE_PATH="$SYSTEMD_DIR/$APPLIANCE_SERVICE_NAME"
+
+if [ ! -x "$AGENT" ]; then
+    echo "missing_agent" >&2
+    exit 1
+fi
+
+if ! command -v systemctl >/dev/null 2>&1; then
+    echo "systemd_required_for_appliance_profile" >&2
+    exit 1
+fi
+
+if [ "$(id -u)" -eq 0 ]; then
+    SUDO=""
+elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
+    SUDO="sudo -n"
+else
+    echo "sudo_required_for_appliance_profile" >&2
+    exit 1
+fi
+
+$SUDO mkdir -p "$SYSTEMD_DIR"
+mkdir -p "$STATE_DIR" "$BIN_DIR" "$LOCAL_BIN"
+
+cat > "$HEALTH_SCRIPT" <<'EOF_HEALTH'
+#!/usr/bin/env bash
+set -euo pipefail
+REMOTE_ROOT={quoted_remote_root}
+AGENT="$REMOTE_ROOT/bin/wifi-pipeline-agent"
+read -r _REQUEST_LINE || true
+while IFS= read -r header; do
+    header="${{header%$'\\r'}}"
+    [[ -z "$header" ]] && break
+done
+BODY="$("$AGENT" doctor)"
+printf 'HTTP/1.1 200 OK\\r\\n'
+printf 'Content-Type: application/json\\r\\n'
+printf 'Cache-Control: no-store\\r\\n'
+printf 'Content-Length: %s\\r\\n' "${{#BODY}}"
+printf '\\r\\n'
+printf '%s' "$BODY"
+EOF_HEALTH
+chmod 755 "$HEALTH_SCRIPT"
+
+cat <<EOF_ENV > "$APPLIANCE_ENV"
+install_profile=appliance
+health_port=$HEALTH_PORT
+health_bind=0.0.0.0
+health_path=/health
+health_endpoint=http://0.0.0.0:$HEALTH_PORT/health
+health_service=$HEALTH_SERVICE_NAME
+health_socket=$HEALTH_SOCKET_NAME
+appliance_service=$APPLIANCE_SERVICE_NAME
+capture_dir=$CAPTURE_DIR
+remote_root=$REMOTE_ROOT
+ssh_user=$(id -un)
+device_name=$(hostname)
+EOF_ENV
+
+cat <<EOF_SERVICE | $SUDO tee "$HEALTH_SERVICE_PATH" >/dev/null
+[Unit]
+Description=WiFi Pipeline Health Endpoint
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/bin/sh $HEALTH_SCRIPT
+StandardInput=socket
+StandardOutput=socket
+Restart=no
+
+[Install]
+WantedBy=multi-user.target
+EOF_SERVICE
+
+cat <<EOF_SOCKET | $SUDO tee "$HEALTH_SOCKET_PATH" >/dev/null
+[Unit]
+Description=WiFi Pipeline Health Endpoint Socket
+
+[Socket]
+ListenStream=$HEALTH_PORT
+Accept=no
+NoDelay=true
+
+[Install]
+WantedBy=sockets.target
+EOF_SOCKET
+
+cat <<EOF_APPLIANCE | $SUDO tee "$APPLIANCE_SERVICE_PATH" >/dev/null
+[Unit]
+Description=WiFi Pipeline Appliance Bootstrap
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -lc 'mkdir -p {shlex.quote(remote_root)}/captures {shlex.quote(remote_root)}/state && {shlex.quote(remote_root)}/bin/wifi-pipeline-agent doctor >/dev/null'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF_APPLIANCE
+
+$SUDO systemctl daemon-reload
+$SUDO systemctl enable --now "$APPLIANCE_SERVICE_NAME" >/dev/null
+$SUDO systemctl enable --now "$HEALTH_SOCKET_NAME" >/dev/null
+
+printf 'install_profile=%s\\n' "appliance"
+printf 'health_port=%s\\n' "$HEALTH_PORT"
+printf 'health_bind=%s\\n' "0.0.0.0"
+printf 'health_path=%s\\n' "/health"
+printf 'health_endpoint=%s\\n' "http://0.0.0.0:$HEALTH_PORT/health"
+printf 'health_service=%s\\n' "$HEALTH_SERVICE_NAME"
+printf 'health_socket=%s\\n' "$HEALTH_SOCKET_NAME"
+printf 'appliance_service=%s\\n' "$APPLIANCE_SERVICE_NAME"
+"""
+
+
+def _install_remote_appliance_profile(
+    source: RemoteSource,
+    *,
+    remote_root: str,
+    capture_dir: str,
+    health_port: int,
+) -> Optional[Dict[str, str]]:
+    result = _run_remote(
+        source,
+        ["--", "sh", "-s"],
+        input=_appliance_profile_script(remote_root, capture_dir, health_port=health_port),
+    )
+    if result.returncode != 0:
+        err((result.stderr or result.stdout or "remote appliance install failed").strip())
+        return None
+
+    info_map: Dict[str, str] = {}
+    for line in (result.stdout or "").splitlines():
+        if "=" in line:
+            key, value = line.split("=", 1)
+            info_map[key.strip()] = value.strip()
+    return info_map
+
+
+def _resolve_remote_install_mode(requested: Optional[str], *, prefer_bundle: bool) -> str:
+    mode = str(requested or "auto").strip().lower() or "auto"
+    if mode not in REMOTE_INSTALL_MODES:
+        return "auto"
+    if mode == "auto":
+        return "bundle" if prefer_bundle else "native"
+    return mode
+
+
+def _resolve_remote_install_profile(requested: Optional[str]) -> str:
+    profile = str(requested or "appliance").strip().lower() or "appliance"
+    if profile not in REMOTE_INSTALL_PROFILES:
+        return "appliance"
+    return profile
+
+
+def _install_remote_bundle(
+    source: RemoteSource,
+    *,
+    remote_home: str,
+    remote_root: str,
+    capture_dir: str,
+    install_packages: bool,
+) -> Optional[Dict[str, str]]:
+    if not shutil.which("scp"):
+        err("scp not found on PATH. Install OpenSSH client and re-run, or use --install-mode native.")
+        return None
+
+    with tempfile.TemporaryDirectory(prefix="wifi-pipeline-agent-") as temp_dir:
+        bundle_path = build_capture_agent_bundle(
+            output_dir=Path(temp_dir),
+            remote_root=remote_root,
+            capture_dir=capture_dir,
+        )
+        remote_bundle_path = f"{remote_home}/.wifi-pipeline-agent-{__version__}-bundle.tar.gz"
+        copy_result = subprocess.run(
+            _scp_args(source) + [str(bundle_path), f"{source.host}:{remote_bundle_path}"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if copy_result.returncode != 0:
+            err(copy_result.stderr.strip() or copy_result.stdout.strip() or "failed to upload the capture-agent bundle")
+            return None
+
+    extract_script = (
+        "set -eu; "
+        f'ARCHIVE={shlex.quote(remote_bundle_path)}; '
+        'TMP_DIR="$(mktemp -d)"; '
+        'cleanup() { rm -rf "$TMP_DIR"; rm -f "$ARCHIVE"; }; '
+        'trap cleanup EXIT; '
+        'tar -xzf "$ARCHIVE" -C "$TMP_DIR"; '
+        'cd "$TMP_DIR"; '
+        './install.sh'
+    )
+    extract_result = _run_remote(source, ["--", "sh", "-lc", extract_script])
+    if extract_result.returncode != 0:
+        err((extract_result.stderr or extract_result.stdout or "remote bundle install failed").strip())
+        return None
+
+    post_result = _run_remote(
+        source,
+        ["--", "sh", "-s"],
+        input=_post_install_setup_script(remote_root, capture_dir, install_packages=install_packages),
+    )
+    if post_result.returncode != 0:
+        err((post_result.stderr or post_result.stdout or "remote post-install setup failed").strip())
+        return None
+
+    info_map: Dict[str, str] = {}
+    for line in (post_result.stdout or "").splitlines():
+        if "=" in line:
+            key, value = line.split("=", 1)
+            info_map[key.strip()] = value.strip()
+    return info_map
+
+
+def _bootstrap_remote_script(remote_root: str, capture_dir: str, install_packages: bool = True) -> str:
+    quoted_remote_root = shlex.quote(remote_root)
+    quoted_capture_dir = shlex.quote(capture_dir)
+    helper_script = _capture_helper_script(capture_dir)
+    runner_script = _privileged_capture_runner_script(capture_dir)
+    service_script = _capture_service_script(remote_root, capture_dir)
+    agent_script = _capture_agent_script(remote_root, capture_dir)
+    install_block = _package_install_block() if install_packages else ""
+    return f"""set -eu
+
+REMOTE_ROOT={quoted_remote_root}
+CAPTURE_DIR={quoted_capture_dir}
+BIN_DIR="$REMOTE_ROOT/bin"
+STATE_DIR="$REMOTE_ROOT/state"
+HELPER="$BIN_DIR/wifi-pipeline-capture"
+SERVICE="$BIN_DIR/wifi-pipeline-service"
+AGENT="$BIN_DIR/wifi-pipeline-agent"
 PRIVILEGED_RUNNER="/usr/local/bin/wifi-pipeline-capture-privileged"
 SUDOERS_FILE="/etc/sudoers.d/wifi-pipeline-capture"
 LOCAL_BIN="$HOME/.local/bin"
@@ -730,9 +1583,13 @@ chmod +x "$HELPER"
 cat > "$SERVICE" <<'EOF_SERVICE'
 {service_script}EOF_SERVICE
 chmod +x "$SERVICE"
+cat > "$AGENT" <<'EOF_AGENT'
+{agent_script}EOF_AGENT
+chmod +x "$AGENT"
 
 ln -sf "$HELPER" "$LOCAL_BIN/wifi-pipeline-capture"
 ln -sf "$SERVICE" "$LOCAL_BIN/wifi-pipeline-service"
+ln -sf "$AGENT" "$LOCAL_BIN/wifi-pipeline-agent"
 setup_privileged_runner
 
 printf 'remote_root=%s\\n' "$REMOTE_ROOT"
@@ -740,6 +1597,7 @@ printf 'capture_dir=%s\\n' "$CAPTURE_DIR"
 printf 'state_dir=%s\\n' "$STATE_DIR"
 printf 'capture_cmd=%s\\n' "$HELPER"
 printf 'service_cmd=%s\\n' "$SERVICE"
+printf 'agent_cmd=%s\\n' "$AGENT"
 printf 'privilege_mode=%s\\n' "$PRIVILEGE_MODE"
 printf 'privileged_runner=%s\\n' "$PRIVILEGED_RUNNER"
 """
@@ -751,6 +1609,10 @@ def _remote_capture_helper_path(remote_home: str) -> str:
 
 def _remote_capture_service_path(remote_home: str) -> str:
     return f"{remote_home}/wifi-pipeline/bin/wifi-pipeline-service"
+
+
+def _remote_capture_agent_path(remote_home: str) -> str:
+    return f"{remote_home}/wifi-pipeline/bin/wifi-pipeline-agent"
 
 
 def _remote_capture_command(
@@ -820,6 +1682,51 @@ def _parse_key_value_output(output: str) -> Dict[str, str]:
     return rows
 
 
+def _build_remote_agent_command(remote_home: str, *args: object) -> str:
+    command = [_remote_capture_agent_path(remote_home)]
+    command.extend(str(arg) for arg in args)
+    return " ".join(shlex.quote(part) for part in command)
+
+
+def _run_remote_agent(
+    source: RemoteSource,
+    remote_home: str,
+    *args: object,
+) -> Dict[str, object]:
+    result = _run_remote(source, ["--", "sh", "-lc", _build_remote_agent_command(remote_home, *args)])
+    stdout = (result.stdout or "").strip()
+    payload: Dict[str, object]
+    if stdout:
+        try:
+            raw = json.loads(stdout)
+            if isinstance(raw, dict):
+                payload = raw
+            else:
+                payload = {"ok": result.returncode == 0, "returncode": result.returncode, "data": {}, "stdout": stdout}
+        except json.JSONDecodeError:
+            payload = {
+                "ok": result.returncode == 0,
+                "returncode": result.returncode,
+                "data": _parse_key_value_output(stdout),
+                "stdout": stdout,
+            }
+    else:
+        payload = {"ok": result.returncode == 0, "returncode": result.returncode, "data": {}}
+
+    payload.setdefault("returncode", result.returncode)
+    payload.setdefault("ok", result.returncode == 0)
+    if result.stderr and "stderr" not in payload:
+        payload["stderr"] = result.stderr.strip()
+    return payload
+
+
+def _agent_data_map(payload: Dict[str, object]) -> Dict[str, str]:
+    raw = payload.get("data")
+    if not isinstance(raw, dict):
+        return {}
+    return {str(key): "" if value is None else str(value) for key, value in raw.items()}
+
+
 def _sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with open(path, "rb") as handle:
@@ -828,7 +1735,17 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _remote_artifact_info(source: RemoteSource, remote_path: str) -> Optional[Dict[str, str]]:
+def _remote_artifact_info(
+    source: RemoteSource,
+    remote_path: str,
+    remote_home: Optional[str] = None,
+) -> Optional[Dict[str, str]]:
+    if remote_home:
+        payload = _run_remote_agent(source, remote_home, "artifact-info", "--path", remote_path)
+        info_map = _agent_data_map(payload)
+        if payload.get("ok") and info_map:
+            return info_map
+
     quoted_file = shlex.quote(remote_path)
     quoted_marker = shlex.quote(f"{remote_path}.complete")
     quoted_checksum = shlex.quote(f"{remote_path}.sha256")
@@ -919,23 +1836,36 @@ def remote_service_host(
         err("Could not determine the remote home directory over SSH.")
         return None
 
-    result = _run_remote_service_action(
+    payload = _run_remote_agent(
         source,
         remote_home,
+        "service",
         action,
-        interface=interface,
-        duration=duration,
-        output=output,
+        *(["--interface", interface] if interface else []),
+        *(["--duration", int(duration)] if duration is not None else []),
+        *(["--output", output] if output else []),
     )
-    if result.returncode != 0:
-        message = (result.stderr or result.stdout or "remote service command failed").strip()
-        if "missing_service" in message:
-            err("Remote capture service not found. Run bootstrap-remote first.")
-        else:
-            err(message)
-        return None
+    info_map = _agent_data_map(payload)
+    if not payload.get("ok"):
+        result = _run_remote_service_action(
+            source,
+            remote_home,
+            action,
+            interface=interface,
+            duration=duration,
+            output=output,
+        )
+        if result.returncode != 0:
+            message = str(payload.get("stderr") or payload.get("stdout") or "").strip()
+            if not message:
+                message = (result.stderr or result.stdout or "remote service command failed").strip()
+            if "missing_service" in message:
+                err("Remote capture service not found. Run bootstrap-remote first.")
+            else:
+                err(message)
+            return None
+        info_map = _parse_key_value_output(result.stdout or "")
 
-    info_map = _parse_key_value_output(result.stdout or "")
     info_map["action"] = action
     if action == "start":
         ok(f"Remote capture service started on {source.host}")
@@ -985,7 +1915,8 @@ def pull_remote_capture(
             return None
         remote_path = resolved
 
-    artifact_info = _remote_artifact_info(source, remote_path)
+    remote_home = _resolve_remote_home(source)
+    artifact_info = _remote_artifact_info(source, remote_path, remote_home=remote_home)
     if artifact_info:
         if artifact_info.get("file_exists") != "yes":
             err(f"Remote capture file was not found: {remote_path}")
@@ -1092,6 +2023,9 @@ def bootstrap_remote_host(
     remote_root: Optional[str] = None,
     capture_dir: Optional[str] = None,
     install_packages: bool = True,
+    install_mode: Optional[str] = None,
+    install_profile: Optional[str] = None,
+    health_port: Optional[int] = None,
     pair: bool = True,
 ) -> Optional[Dict[str, str]]:
     section("Remote Bootstrap")
@@ -1115,36 +2049,74 @@ def bootstrap_remote_host(
 
     resolved_remote_root = remote_root or f"{remote_home}/wifi-pipeline"
     resolved_capture_dir = capture_dir or f"{resolved_remote_root}/captures"
-    script = _bootstrap_remote_script(
-        remote_root=resolved_remote_root,
-        capture_dir=resolved_capture_dir,
-        install_packages=install_packages,
+    chosen_install_profile = _resolve_remote_install_profile(
+        install_profile or str(config.get("remote_install_profile") or "").strip() or None
+    )
+    chosen_health_port = int(health_port if health_port is not None else config.get("remote_health_port", DEFAULT_APPLIANCE_HEALTH_PORT) or DEFAULT_APPLIANCE_HEALTH_PORT)
+    chosen_install_mode = _resolve_remote_install_mode(
+        install_mode or str(config.get("remote_install_mode") or "").strip() or None,
+        prefer_bundle=bool(shutil.which("scp")),
     )
 
-    info(f"Bootstrapping capture helper on {source.host}")
-    result = _run_remote(
-        source,
-        ["--", "sh", "-s"],
-        input=script,
-    )
-    if result.returncode != 0:
-        message = (result.stderr or result.stdout or "remote bootstrap failed").strip()
-        err(message)
-        return None
+    info(f"Bootstrapping capture helper on {source.host} using {chosen_install_mode} install mode")
+    if chosen_install_mode == "bundle":
+        info_map = _install_remote_bundle(
+            source,
+            remote_home=remote_home,
+            remote_root=resolved_remote_root,
+            capture_dir=resolved_capture_dir,
+            install_packages=install_packages,
+        )
+        if not info_map:
+            return None
+    else:
+        script = _bootstrap_remote_script(
+            remote_root=resolved_remote_root,
+            capture_dir=resolved_capture_dir,
+            install_packages=install_packages,
+        )
+        result = _run_remote(
+            source,
+            ["--", "sh", "-s"],
+            input=script,
+        )
+        if result.returncode != 0:
+            message = (result.stderr or result.stdout or "remote bootstrap failed").strip()
+            err(message)
+            return None
 
-    info_map: Dict[str, str] = {}
-    for line in (result.stdout or "").splitlines():
-        if "=" in line:
-            key, value = line.split("=", 1)
-            info_map[key.strip()] = value.strip()
+        info_map = {}
+        for line in (result.stdout or "").splitlines():
+            if "=" in line:
+                key, value = line.split("=", 1)
+                info_map[key.strip()] = value.strip()
+
+    if chosen_install_profile == "appliance":
+        appliance_info = _install_remote_appliance_profile(
+            source,
+            remote_root=resolved_remote_root,
+            capture_dir=resolved_capture_dir,
+            health_port=chosen_health_port,
+        )
+        if not appliance_info:
+            return None
+        info_map.update(appliance_info)
+    else:
+        info_map.setdefault("install_profile", "standard")
 
     capture_script = info_map.get("capture_cmd") or f"{resolved_remote_root}/bin/wifi-pipeline-capture"
     service_script = info_map.get("service_cmd") or f"{resolved_remote_root}/bin/wifi-pipeline-service"
+    agent_script = info_map.get("agent_cmd") or f"{resolved_remote_root}/bin/wifi-pipeline-agent"
     privilege_mode = info_map.get("privilege_mode") or "fallback"
     ok(f"Remote bootstrap complete on {source.host}")
     info(f"Remote capture directory: {info_map.get('capture_dir') or resolved_capture_dir}")
     info(f"Remote capture command : {capture_script} --interface wlan0 --duration 60")
     info(f"Remote service command : {service_script} status")
+    info(f"Remote agent command  : {agent_script} doctor")
+    info(f"Remote install mode   : {chosen_install_mode}")
+    info(f"Remote install profile: {chosen_install_profile}")
+    if info_map.get("health_endpoint"):
+        info(f"Remote health endpoint: {info_map['health_endpoint']}")
     info(f"Remote privilege mode : {privilege_mode}")
     if privilege_mode != "sudoers_runner":
         warn(
@@ -1156,6 +2128,11 @@ def bootstrap_remote_host(
         "state_dir": info_map.get("state_dir") or f"{resolved_remote_root}/state",
         "capture_cmd": capture_script,
         "service_cmd": service_script,
+        "agent_cmd": agent_script,
+        "install_mode": chosen_install_mode,
+        "install_profile": info_map.get("install_profile") or chosen_install_profile,
+        "health_port": str(info_map.get("health_port") or chosen_health_port),
+        "health_endpoint": info_map.get("health_endpoint") or "",
         "privilege_mode": privilege_mode,
         "privileged_runner": info_map.get("privileged_runner") or "/usr/local/bin/wifi-pipeline-capture-privileged",
     }
@@ -1202,23 +2179,37 @@ def start_remote_capture(
     if extra_args:
         warn("start-remote ignores extra tcpdump args when using the managed remote service.")
 
-    start_result = _run_remote_service_action(
+    start_payload = _run_remote_agent(
         source,
         remote_home,
+        "service",
         "start",
-        interface=chosen_interface,
-        duration=chosen_duration,
-        output=output,
+        "--interface",
+        chosen_interface,
+        "--duration",
+        chosen_duration,
+        *(["--output", output] if output else []),
     )
-    if start_result.returncode != 0:
-        message = (start_result.stderr or start_result.stdout or "remote capture failed").strip()
-        if "missing_service" in message:
-            err("Remote capture service not found. Run bootstrap-remote first.")
-        else:
-            err(message)
-        return None
-
-    start_info = _parse_key_value_output(start_result.stdout or "")
+    start_info = _agent_data_map(start_payload)
+    if not start_payload.get("ok"):
+        start_result = _run_remote_service_action(
+            source,
+            remote_home,
+            "start",
+            interface=chosen_interface,
+            duration=chosen_duration,
+            output=output,
+        )
+        if start_result.returncode != 0:
+            message = str(start_payload.get("stderr") or start_payload.get("stdout") or "").strip()
+            if not message:
+                message = (start_result.stderr or start_result.stdout or "remote capture failed").strip()
+            if "missing_service" in message:
+                err("Remote capture service not found. Run bootstrap-remote first.")
+            else:
+                err(message)
+            return None
+        start_info = _parse_key_value_output(start_result.stdout or "")
     remote_path = start_info.get("output")
     if not remote_path:
         err("Remote capture service started, but no remote output path was returned.")
@@ -1228,11 +2219,17 @@ def start_remote_capture(
     final_info = dict(start_info)
     while time.time() <= deadline:
         time.sleep(1)
-        status_result = _run_remote_service_action(source, remote_home, "status")
-        if status_result.returncode != 0:
-            err((status_result.stderr or status_result.stdout or "remote service status failed").strip())
-            return None
-        final_info = _parse_key_value_output(status_result.stdout or "")
+        status_payload = _run_remote_agent(source, remote_home, "service", "status")
+        final_info = _agent_data_map(status_payload)
+        if not status_payload.get("ok"):
+            status_result = _run_remote_service_action(source, remote_home, "status")
+            if status_result.returncode != 0:
+                message = str(status_payload.get("stderr") or status_payload.get("stdout") or "").strip()
+                if not message:
+                    message = (status_result.stderr or status_result.stdout or "remote service status failed").strip()
+                err(message)
+                return None
+            final_info = _parse_key_value_output(status_result.stdout or "")
         if final_info.get("service_status") != "running":
             break
     else:
@@ -1298,6 +2295,21 @@ def doctor_remote_host(
             "reachable": False,
             "home": "",
             "tcpdump": False,
+            "agent": False,
+            "agent_path": "",
+            "agent_protocol": "",
+            "control_mode": "legacy_shell",
+            "install_profile": "standard",
+            "health_port": "",
+            "health_path": "",
+            "health_endpoint": "",
+            "health_service": "",
+            "health_socket": "",
+            "health_socket_enabled": None,
+            "health_socket_active": None,
+            "appliance_service": "",
+            "appliance_service_enabled": None,
+            "appliance_service_active": None,
             "helper": False,
             "helper_path": "",
             "service": False,
@@ -1334,6 +2346,7 @@ def doctor_remote_host(
         capture_dir = configured_remote_path.rstrip("/")
 
     interface_name = str(interface or config.get("remote_interface") or "").strip()
+    agent_path = _remote_capture_agent_path(remote_home)
     helper_path = _remote_capture_helper_path(remote_home)
     helper_local_path = f"{remote_home}/.local/bin/wifi-pipeline-capture"
     service_path = _remote_capture_service_path(remote_home)
@@ -1384,12 +2397,37 @@ def doctor_remote_host(
             ]
         )
 
-    diag = _run_remote(source, ["--", "sh", "-lc", "; ".join(diag_parts)])
     remote: Dict[str, object] = dict(result["remote"])
     remote["reachable"] = True
     remote["home"] = remote_home
-    if diag.returncode == 0:
-        parsed = _parse_key_value_output(diag.stdout or "")
+    remote["agent_path"] = agent_path
+    agent_payload = _run_remote_agent(
+        source,
+        remote_home,
+        "doctor",
+        *(["--interface", interface_name] if interface_name else []),
+    )
+    if agent_payload.get("ok"):
+        parsed = _agent_data_map(agent_payload)
+        remote["agent"] = parsed.get("agent") == "yes"
+        remote["agent_path"] = parsed.get("agent_path") or agent_path
+        remote["agent_protocol"] = parsed.get("agent_protocol") or str(agent_payload.get("protocol") or "")
+        remote["control_mode"] = parsed.get("control_mode") or "agent"
+        remote["install_profile"] = parsed.get("install_profile") or "standard"
+        remote["health_port"] = parsed.get("health_port") or ""
+        remote["health_path"] = parsed.get("health_path") or ""
+        remote["health_endpoint"] = parsed.get("health_endpoint") or ""
+        remote["health_service"] = parsed.get("health_service") or ""
+        remote["health_socket"] = parsed.get("health_socket") or ""
+        appliance_enabled = parsed.get("appliance_service_enabled")
+        appliance_active = parsed.get("appliance_service_active")
+        socket_enabled = parsed.get("health_socket_enabled")
+        socket_active = parsed.get("health_socket_active")
+        remote["appliance_service"] = parsed.get("appliance_service") or ""
+        remote["appliance_service_enabled"] = True if appliance_enabled == "yes" else False if appliance_enabled == "no" else None
+        remote["appliance_service_active"] = True if appliance_active == "yes" else False if appliance_active == "no" else None
+        remote["health_socket_enabled"] = True if socket_enabled == "yes" else False if socket_enabled == "no" else None
+        remote["health_socket_active"] = True if socket_active == "yes" else False if socket_active == "no" else None
         remote["tcpdump"] = parsed.get("tcpdump") == "yes"
         remote["helper"] = parsed.get("helper") == "yes"
         remote["helper_path"] = parsed.get("helper_path") or helper_path
@@ -1418,21 +2456,66 @@ def doctor_remote_host(
             else:
                 remote["interface_exists"] = None
     else:
-        remote["helper_path"] = helper_path
-        remote["service_path"] = service_path
-        remote["state_dir"] = state_dir
-        remote["privileged_runner_path"] = privileged_runner_path
-        remote["capture_dir"] = capture_dir
+        diag = _run_remote(source, ["--", "sh", "-lc", "; ".join(diag_parts)])
+        if diag.returncode == 0:
+            parsed = _parse_key_value_output(diag.stdout or "")
+            remote["tcpdump"] = parsed.get("tcpdump") == "yes"
+            remote["helper"] = parsed.get("helper") == "yes"
+            remote["helper_path"] = parsed.get("helper_path") or helper_path
+            remote["service"] = parsed.get("service") == "yes"
+            remote["service_path"] = parsed.get("service_path") or service_path
+            remote["control_mode"] = "legacy_shell"
+            remote["service_status"] = parsed.get("service_status") or "missing"
+            remote["state_dir"] = parsed.get("state_dir") or state_dir
+            remote["state_dir_exists"] = parsed.get("state_dir_exists") == "yes"
+            remote["state_dir_writable"] = parsed.get("state_dir_writable") == "yes"
+            remote["privileged_runner"] = parsed.get("privileged_runner") == "yes"
+            remote["privileged_runner_path"] = parsed.get("privileged_runner_path") or privileged_runner_path
+            remote["privilege_mode"] = parsed.get("privilege_mode") or "fallback"
+            remote["capture_dir"] = parsed.get("capture_dir") or capture_dir
+            remote["capture_dir_exists"] = parsed.get("capture_dir_exists") == "yes"
+            remote["capture_dir_writable"] = parsed.get("capture_dir_writable") == "yes"
+            remote["complete_marker"] = parsed.get("complete_marker") == "yes"
+            remote["checksum_file"] = parsed.get("checksum_file") == "yes"
+            remote["checksum_value"] = parsed.get("checksum_value") or ""
+            remote["remote_size_bytes"] = parsed.get("remote_size_bytes") or ""
+            if interface_name:
+                interface_state = parsed.get("interface_exists")
+                if interface_state == "yes":
+                    remote["interface_exists"] = True
+                elif interface_state == "no":
+                    remote["interface_exists"] = False
+                else:
+                    remote["interface_exists"] = None
+        else:
+            remote["control_mode"] = "legacy_shell"
+            remote["helper_path"] = helper_path
+            remote["service_path"] = service_path
+            remote["state_dir"] = state_dir
+            remote["privileged_runner_path"] = privileged_runner_path
+            remote["capture_dir"] = capture_dir
 
     result["remote"] = remote
     interface_ok = True
     if interface_name:
         interface_state = remote.get("interface_exists")
         interface_ok = interface_state is not False
+    expected_profile = _resolve_remote_install_profile(
+        str(config.get("remote_install_profile") or remote.get("install_profile") or "appliance")
+    )
+    appliance_ok = True
+    if expected_profile == "appliance":
+        appliance_ok = bool(
+            str(remote.get("install_profile") or "") == "appliance"
+            and bool(remote.get("health_endpoint"))
+            and remote.get("health_socket_enabled") is not False
+            and remote.get("appliance_service_enabled") is not False
+        )
     result["ok"] = bool(
         result["local"]["ssh"]
         and result["local"]["scp"]
         and remote["reachable"]
+        and remote["agent"]
         and remote["tcpdump"]
         and remote["helper"]
         and remote["service"]
@@ -1442,6 +2525,7 @@ def doctor_remote_host(
         and remote["capture_dir_exists"]
         and remote["capture_dir_writable"]
         and interface_ok
+        and appliance_ok
     )
     return result
 

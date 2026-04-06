@@ -81,3 +81,35 @@ Treat the release as:
 
 - `software-ready` when the simulated validation matrix passes and packaging is green
 - `fully validated` only after the real hardware validation gate above passes
+
+## Step 12: enforced release gate
+
+The release workflow now expects real validation artifacts in `validation_matrix/` and runs:
+
+```bash
+python scripts/release_gate.py \
+  --ubuntu-report validation_matrix/ubuntu_standalone_validation.json \
+  --pi-report validation_matrix/pi_standalone_validation.json \
+  --windows-report validation_matrix/windows_remote_validation.json \
+  --sample-report validation_matrix/sample_text_analysis.json \
+  --sample-report validation_matrix/sample_video_analysis.json
+```
+
+That command checks:
+
+- Ubuntu standalone validation report
+- Raspberry Pi OS standalone validation report
+- Windows remote validation report
+- qualified adapter evidence from the Linux validation reports
+- at least one supported decode/replay sample analysis report
+
+The tag-based release workflow should now be treated as blocked until that gate passes.
+
+Recommended closeout order:
+
+1. write the Ubuntu standalone validation report into `validation_matrix/ubuntu_standalone_validation.json`
+2. write the Raspberry Pi OS validation report into `validation_matrix/pi_standalone_validation.json`
+3. write the Windows remote validation report into `validation_matrix/windows_remote_validation.json`
+4. copy one or more supported sample `analysis_report.json` files into `validation_matrix/`
+5. run `python scripts/release_gate.py ...`
+6. only tag the release after that command returns success

@@ -34,6 +34,9 @@ def test_load_config_backfills_defaults(tmp_path) -> None:
     assert loaded["replay_format_hint"] == "jpeg"
     assert loaded["remote_host"] == "pi@host"
     assert loaded["remote_port"] == 22
+    assert loaded["remote_install_mode"] == "auto"
+    assert loaded["remote_install_profile"] == "appliance"
+    assert loaded["remote_health_port"] == 8741
     assert loaded["monitor_method"] == "airodump"
     assert "product_mode" in loaded
 

@@ -68,6 +68,19 @@ def test_guess_unit_type_and_mappings() -> None:
     assert protocols.suggested_extension("plain_text") == ".txt"
 
 
+def test_protocol_support_profiles_and_stream_summary() -> None:
+    png = protocols.protocol_support("png_image")
+    opaque = protocols.protocol_support("opaque_chunk")
+    summary = protocols.summarize_stream_support({"png_image": 3, "opaque_chunk": 1})
+
+    assert png.decode_level == "guaranteed"
+    assert png.replay_level == "guaranteed"
+    assert opaque.replay_level == "unsupported"
+    assert summary["dominant_unit_type"] == "png_image"
+    assert summary["replay_hint"] == "png"
+    assert summary["replay_level"] == "unsupported"
+
+
 def test_summarize_protocol_hits_counts_multiple_types() -> None:
     summary = protocols.summarize_protocol_hits(
         [

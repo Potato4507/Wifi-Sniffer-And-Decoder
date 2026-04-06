@@ -9,6 +9,7 @@ from wifi_pipeline.playback import (
     RtpJitterBuffer,
     _extension_for_hint,
     infer_replay_hint,
+    replay_support_summary,
     reconstruct_from_capture,
 )
 
@@ -103,3 +104,35 @@ def test_reconstruct_from_capture_writes_decrypted_units_and_aggregate(tmp_path)
     assert (target_dir / "unit_00001.txt").read_bytes() == b"HELLO "
     assert (target_dir / "unit_00002.txt").read_bytes() == b"WORLD"
     assert (target_dir / "stream_reconstructed.txt").read_bytes() == b"HELLO WORLD"
+
+
+def test_replay_support_summary_and_unsupported_reconstruct(tmp_path) -> None:
+    manifest_path = tmp_path / "manifest.json"
+    encrypted = tmp_path / "unit1.bin"
+    encrypted.write_bytes(b"\x01\x02\x03\x04")
+    manifest = {
+        "units": [
+            {
+                "stream_id": "stream-1",
+                "unit_index": 1,
+                "timestamp_start": 1.0,
+                "unit_type": "opaque_chunk",
+                "file": str(encrypted),
+            }
+        ]
+    }
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    config = {"output_dir": str(tmp_path), "replay_format_hint": "auto", "video_codec": "raw"}
+    report = {
+        "candidate_material": {"mode": "static_xor_candidate", "key_hex": "01"},
+        "selected_candidate_stream": {
+            "stream_id": "stream-1",
+            "unit_type_counts": {"opaque_chunk": 1},
+        },
+    }
+
+    support = replay_support_summary(report)
+    result = reconstruct_from_capture(config, report)
+
+    assert support["replay_level"] == "unsupported"
+    assert result is None

@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -34,6 +35,20 @@ def _require(tool: str) -> Optional[str]:
     if not path:
         err(f"{tool} not found on PATH.")
     return path
+
+
+@dataclass(frozen=True)
+class WPACrackReadiness:
+    state: str
+    status: str
+    handshake_cap: Optional[str]
+    crack_ready: bool
+    decrypt_ready: bool
+    summary: str
+    detail: str
+
+
+_MIN_HANDSHAKE_BYTES = 1024
 
 
 # ---------------------------------------------------------------------------
@@ -473,6 +488,147 @@ class Capture:
         self._handshake: Optional[HandshakeCapture] = None
         self._cracker = WPACracker(config)
 
+    def _resolve_handshake_cap(self, handshake_cap: Optional[str] = None) -> Optional[Path]:
+        cap = handshake_cap
+        if not cap and self._handshake and self._handshake.handshake_path:
+            cap = str(self._handshake.handshake_path)
+        if not cap:
+            preferred_names = (
+                "airodump_hs-01.cap",
+                "airodump_hs-01.pcapng",
+                "besside_handshakes.cap",
+                "monitor_raw.pcap",
+                "monitor_raw.pcapng",
+            )
+            for name in preferred_names:
+                candidate = self.output_dir / name
+                if candidate.exists():
+                    return candidate
+
+            caps = []
+            for pattern in ("*handshake*.cap", "*handshake*.pcap", "*handshake*.pcapng", "*hs*.cap", "*hs*.pcap", "*hs*.pcapng"):
+                caps.extend(self.output_dir.glob(pattern))
+            if caps:
+                cap = str(max(caps, key=lambda p: p.stat().st_mtime))
+        if not cap:
+            return None
+        return Path(cap)
+
+    def inspect_wpa_crack_path(self, handshake_cap: Optional[str] = None) -> WPACrackReadiness:
+        cap_path = self._resolve_handshake_cap(handshake_cap)
+        password = resolve_wpa_password(self.config)
+        essid = str(self.config.get("ap_essid") or "").strip()
+        wordlist = str(self.config.get("wordlist_path") or "").strip()
+        has_wordlist = bool(wordlist and Path(wordlist).exists())
+        has_aircrack = bool(shutil.which("aircrack-ng"))
+        has_hashcat = bool(shutil.which("hashcat"))
+        has_converter = bool(shutil.which("cap2hccapx") or shutil.which("hcxpcapngtool"))
+        has_airdecap = bool(shutil.which("airdecap-ng"))
+
+        if not cap_path or not cap_path.exists():
+            return WPACrackReadiness(
+                state="unsupported",
+                status="unsupported",
+                handshake_cap=str(cap_path) if cap_path else None,
+                crack_ready=False,
+                decrypt_ready=False,
+                summary="No handshake capture is available yet.",
+                detail="Run monitor or point crack/decrypt at a real handshake capture before attempting WPA recovery.",
+            )
+
+        size_bytes = cap_path.stat().st_size
+        decrypt_ready = bool(password and essid and has_airdecap)
+        if size_bytes < _MIN_HANDSHAKE_BYTES:
+            return WPACrackReadiness(
+                state="captured_handshake_insufficient",
+                status="unsupported",
+                handshake_cap=str(cap_path),
+                crack_ready=False,
+                decrypt_ready=decrypt_ready,
+                summary="The handshake artifact is too small to trust.",
+                detail=(
+                    f"{cap_path.name} is only {size_bytes} bytes. Re-capture a fuller handshake before trying WPA recovery."
+                ),
+            )
+
+        if password:
+            status = "supported" if decrypt_ready else "supported_with_limits"
+            detail = "Known PSK supplied."
+            if not essid:
+                detail += " Decryption still needs ap_essid in lab.json."
+            elif not has_airdecap:
+                detail += " Decryption still needs airdecap-ng installed."
+            return WPACrackReadiness(
+                state="known_key_supplied",
+                status=status,
+                handshake_cap=str(cap_path),
+                crack_ready=True,
+                decrypt_ready=decrypt_ready,
+                summary="A WPA key is already configured, so cracking is not required.",
+                detail=detail,
+            )
+
+        crack_tool_ready = has_aircrack or (has_hashcat and has_converter)
+        if crack_tool_ready and has_wordlist:
+            detail_parts = []
+            if has_aircrack:
+                detail_parts.append("aircrack-ng dictionary attack is available")
+            if has_hashcat and has_converter:
+                detail_parts.append("hashcat conversion path is available")
+            if not essid:
+                detail_parts.append("set ap_essid before expecting airdecap-ng output")
+            if not has_airdecap:
+                detail_parts.append("install airdecap-ng for the decrypt step")
+            return WPACrackReadiness(
+                state="known_wordlist_attack_supported",
+                status="supported_with_limits",
+                handshake_cap=str(cap_path),
+                crack_ready=True,
+                decrypt_ready=bool(essid and has_airdecap),
+                summary="The capture is large enough to attempt a wordlist-based WPA recovery.",
+                detail=". ".join(part[0].upper() + part[1:] for part in detail_parts) + ".",
+            )
+
+        missing: List[str] = []
+        if not has_wordlist:
+            missing.append("a real wordlist_path")
+        if not has_aircrack and not has_hashcat:
+            missing.append("aircrack-ng or hashcat")
+        elif has_hashcat and not has_converter and not has_aircrack:
+            missing.append("cap2hccapx or hcxpcapngtool for hashcat conversion")
+        if not has_airdecap:
+            missing.append("airdecap-ng for the decrypt step")
+        if not essid:
+            missing.append("ap_essid for the decrypt step")
+
+        return WPACrackReadiness(
+            state="unsupported",
+            status="unsupported",
+            handshake_cap=str(cap_path),
+            crack_ready=False,
+            decrypt_ready=False,
+            summary="The capture exists, but the supported WPA recovery path is not ready.",
+            detail="Missing prerequisites: " + ", ".join(missing) + ".",
+        )
+
+    def print_wpa_crack_status(self, handshake_cap: Optional[str] = None) -> WPACrackReadiness:
+        readiness = self.inspect_wpa_crack_path(handshake_cap)
+        label = readiness.status.replace("_", " ")
+        if readiness.status == "supported":
+            state_color = ok
+        elif readiness.status == "supported_with_limits":
+            state_color = warn
+        else:
+            state_color = err
+
+        section("WPA Crack Readiness")
+        info(f"State: {readiness.state}")
+        state_color(f"Status: {label}")
+        info(f"Handshake: {readiness.handshake_cap or '(none)'}")
+        info(readiness.summary)
+        info(readiness.detail)
+        return readiness
+
     # ------------------------------------------------------------------
     # Original helpers (unchanged)
     # ------------------------------------------------------------------
@@ -751,14 +907,14 @@ class Capture:
         """
         section("WPA2 Crack + Decrypt")
 
-        cap = handshake_cap
-        if not cap and self._handshake and self._handshake.handshake_path:
-            cap = str(self._handshake.handshake_path)
-        if not cap:
-            # Last resort: look for any .cap file in output dir
-            caps = list(self.output_dir.glob("*.cap"))
-            if caps:
-                cap = str(max(caps, key=lambda p: p.stat().st_mtime))
+        readiness = self.inspect_wpa_crack_path(handshake_cap)
+        info(f"WPA path state: {readiness.state}")
+        info(readiness.summary)
+        if not readiness.crack_ready:
+            err(readiness.detail)
+            return None
+
+        cap = readiness.handshake_cap
         if not cap:
             err("No handshake capture file available. Run run_monitor() first.")
             return None
@@ -775,6 +931,11 @@ class Capture:
                 return None
         else:
             ok(f"Using pre-configured PSK.")
+
+        decrypt_readiness = self.inspect_wpa_crack_path(cap)
+        if not decrypt_readiness.decrypt_ready:
+            err(decrypt_readiness.detail)
+            return None
 
         return self.strip_wifi_layer(pcap_path=cap)
 

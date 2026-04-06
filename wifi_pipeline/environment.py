@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import os
+import platform
 import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
-from .ui import BOLD, CYAN, DIM, RESET, ask, confirm, err, info, ok, section, warn
+from .ui import BOLD, CYAN, DIM, GREEN, RED, RESET, YELLOW, ask, confirm, err, info, ok, section, warn
 
 IS_WINDOWS = sys.platform.startswith("win")
 IS_LINUX   = sys.platform.startswith("linux")
@@ -45,6 +46,39 @@ class CommandSupport:
     profile: ProductProfile
     status: str
     message: str
+
+
+@dataclass(frozen=True)
+class WorkflowSupport:
+    area: str
+    tier: str
+    summary: str
+    detail: str
+
+
+@dataclass(frozen=True)
+class HardwareCatalogEntry:
+    family: str
+    role: str
+    status: str
+    profiles: Tuple[str, ...]
+    match_terms: Tuple[str, ...]
+    monitor_mode: str
+    injection: str
+    channels: str
+    detail: str
+
+
+@dataclass(frozen=True)
+class HardwareQualification:
+    area: str
+    label: str
+    status: str
+    summary: str
+    detail: str
+    monitor_mode: str
+    injection: str
+    channels: str
 
 
 PRODUCT_PROFILES: Dict[str, ProductProfile] = {
@@ -97,6 +131,65 @@ PRODUCT_PROFILES: Dict[str, ProductProfile] = {
         description="Experimental macOS workflow.",
     ),
 }
+
+
+SUPPORTED_HARDWARE_CATALOG: Tuple[HardwareCatalogEntry, ...] = (
+    HardwareCatalogEntry(
+        family="Atheros AR9271 / ath9k_htc",
+        role="linux_capture_adapter",
+        status="supported",
+        profiles=("ubuntu_standalone", "pi_standalone", "linux_best_effort"),
+        match_terms=("ath9k_htc", "ar9271", "qca9271", "atheros ar9271"),
+        monitor_mode="qualified",
+        injection="qualified",
+        channels="2.4 GHz",
+        detail="Best-supported USB adapter family for the full Linux Wi-Fi lab workflow.",
+    ),
+    HardwareCatalogEntry(
+        family="MediaTek MT7612U / mt76x2u",
+        role="linux_capture_adapter",
+        status="supported_with_limits",
+        profiles=("ubuntu_standalone", "pi_standalone", "linux_best_effort"),
+        match_terms=("mt76x2u", "mt7612u"),
+        monitor_mode="qualified",
+        injection="best effort",
+        channels="2.4/5 GHz",
+        detail="Good dual-band Linux capture option, but injection and firmware behavior still vary by device.",
+    ),
+    HardwareCatalogEntry(
+        family="Ralink/MediaTek RT5572 / rt2800usb",
+        role="linux_capture_adapter",
+        status="supported_with_limits",
+        profiles=("ubuntu_standalone", "pi_standalone", "linux_best_effort"),
+        match_terms=("rt2800usb", "rt5572"),
+        monitor_mode="qualified",
+        injection="best effort",
+        channels="2.4/5 GHz",
+        detail="Common dual-band USB capture option; keep expectations conservative for injection-heavy lab steps.",
+    ),
+    HardwareCatalogEntry(
+        family="Intel iwlwifi family",
+        role="linux_capture_adapter",
+        status="supported_with_limits",
+        profiles=("ubuntu_standalone", "linux_best_effort"),
+        match_terms=("iwlwifi", "intel wireless", "intel corporation wifi"),
+        monitor_mode="available on many chipsets",
+        injection="not part of the qualified lab path",
+        channels="chipset dependent",
+        detail="Useful for pcap-first and sniffing workflows, but not the narrow recommended adapter family for full Wi-Fi lab work.",
+    ),
+    HardwareCatalogEntry(
+        family="Broadcom brcmfmac family",
+        role="linux_capture_adapter",
+        status="unsupported",
+        profiles=("ubuntu_standalone", "pi_standalone", "linux_best_effort"),
+        match_terms=("brcmfmac", "broadcom"),
+        monitor_mode="limited / chipset dependent",
+        injection="not qualified",
+        channels="chipset dependent",
+        detail="Typical onboard Broadcom Raspberry Pi radios are not part of the qualified monitor/injection hardware program.",
+    ),
+)
 
 
 # Tools required/optional on Windows
@@ -164,6 +257,95 @@ def _find_windows_wlanhelper() -> Optional[str]:
         if candidate and os.path.exists(candidate):
             return candidate
 
+    return None
+
+
+def _tool_path(name: str) -> Optional[str]:
+    if IS_WINDOWS and name.lower().startswith("wlanhelper"):
+        return _find_windows_wlanhelper()
+    return shutil.which(name)
+
+
+def _tool_available(name: str) -> bool:
+    return bool(_tool_path(name))
+
+
+def _tier_sort_key(tier: str) -> int:
+    order = {
+        "supported": 0,
+        "supported_with_limits": 1,
+        "heuristic": 2,
+        "unsupported": 3,
+    }
+    return order.get(tier, 99)
+
+
+def _tier_label(tier: str) -> str:
+    labels = {
+        "supported": "supported",
+        "supported_with_limits": "supported with limits",
+        "heuristic": "heuristic",
+        "unsupported": "unsupported",
+    }
+    return labels.get(tier, tier.replace("_", " "))
+
+
+def _read_text_file(path: str) -> str:
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as handle:
+            return handle.read().strip()
+    except OSError:
+        return ""
+
+
+def _machine_architecture() -> str:
+    return platform.machine().strip().lower() or "unknown"
+
+
+def _linux_interface_driver(interface: str) -> str:
+    if not IS_LINUX or not interface:
+        return ""
+
+    uevent_path = os.path.join("/sys/class/net", interface, "device", "uevent")
+    if os.path.exists(uevent_path):
+        for raw_line in _read_text_file(uevent_path).splitlines():
+            if raw_line.startswith("DRIVER="):
+                return raw_line.split("=", 1)[1].strip().lower()
+
+    driver_link = os.path.join("/sys/class/net", interface, "device", "driver")
+    if os.path.islink(driver_link):
+        try:
+            return os.path.basename(os.path.realpath(driver_link)).strip().lower()
+        except OSError:
+            return ""
+
+    return ""
+
+
+def _linux_interface_fingerprint(interface: str, description: str = "") -> str:
+    if not IS_LINUX or not interface:
+        return ""
+
+    base = os.path.join("/sys/class/net", interface, "device")
+    parts = [
+        interface,
+        description,
+        _linux_interface_driver(interface),
+        _read_text_file(os.path.join(base, "vendor")),
+        _read_text_file(os.path.join(base, "device")),
+        _read_text_file(os.path.join(base, "modalias")),
+        _read_text_file(os.path.join(base, "uevent")),
+    ]
+    return " ".join(part.strip().lower() for part in parts if part and part.strip())
+
+
+def _match_hardware_catalog(fingerprint: str, profile_key: str) -> Optional[HardwareCatalogEntry]:
+    lowered = fingerprint.lower()
+    for entry in SUPPORTED_HARDWARE_CATALOG:
+        if profile_key not in entry.profiles:
+            continue
+        if any(term in lowered for term in entry.match_terms):
+            return entry
     return None
 
 
@@ -255,8 +437,8 @@ def command_support(
 ) -> CommandSupport:
     profile = resolve_product_profile(config)
 
-    analysis_commands = {"config", "deps", "extract", "detect", "analyze", "play", "corpus", "web", "menu"}
-    remote_commands = {"remote", "pair-remote", "bootstrap-remote", "start-remote", "remote-service", "validate-remote", "setup-remote"}
+    analysis_commands = {"config", "deps", "hardware", "preflight", "release-gate", "crack-status", "extract", "detect", "analyze", "play", "corpus", "web", "menu"}
+    remote_commands = {"remote", "discover-remote", "pair-remote", "bootstrap-remote", "start-remote", "remote-service", "validate-remote", "setup-remote"}
     local_validation_commands = {"validate-local"}
     local_capture_commands = {"capture"}
     local_wifi_commands = {"monitor", "crack", "wifi"}
@@ -318,6 +500,415 @@ def command_support(
     return CommandSupport(command, profile, "official", "")
 
 
+def workflow_support_matrix(config: Optional[Dict[str, object]] = None) -> List[WorkflowSupport]:
+    profile = resolve_product_profile(config)
+
+    has_dumpcap = _tool_available("dumpcap")
+    has_tcpdump = _tool_available("tcpdump")
+    has_tshark = _tool_available("tshark")
+    has_ssh = _tool_available("ssh")
+    has_scp = _tool_available("scp")
+    has_airmon = _tool_available("airmon-ng")
+    has_airodump = _tool_available("airodump-ng")
+    has_aircrack = _tool_available("aircrack-ng")
+    has_airdecap = _tool_available("airdecap-ng")
+    has_wlanhelper = _tool_available("WlanHelper")
+
+    supports_local_capture = has_dumpcap or has_tcpdump
+    supports_remote_control = has_ssh and has_scp
+    supports_monitor_toolchain = has_airmon or has_airodump or has_wlanhelper or has_tcpdump
+    supports_wifi_toolchain = has_aircrack and has_airdecap
+
+    rows: List[WorkflowSupport] = []
+
+    analysis_tier = "supported" if profile.official else "supported_with_limits"
+    analysis_detail = (
+        "Importing a pcap and running extract/detect/analyze is a first-class workflow here."
+        if profile.official
+        else "Analysis remains available here, but this platform sits outside the narrow official support matrix."
+    )
+    rows.append(
+        WorkflowSupport(
+            area="pcap import + analysis",
+            tier=analysis_tier,
+            summary="Import an existing pcap and run the analysis pipeline.",
+            detail=analysis_detail,
+        )
+    )
+
+    if profile.key in ("ubuntu_standalone", "pi_standalone"):
+        capture_tier = "supported" if supports_local_capture else "unsupported"
+        capture_detail = (
+            "The standalone Linux workflow is fully supported when dumpcap or tcpdump is installed."
+            if supports_local_capture
+            else "This official Linux workflow still needs a local capture tool such as dumpcap or tcpdump."
+        )
+    elif profile.key == "linux_best_effort":
+        capture_tier = "supported_with_limits" if supports_local_capture else "unsupported"
+        capture_detail = (
+            "Local capture is available, but this Linux distro is outside the official support matrix."
+            if supports_local_capture
+            else "This best-effort Linux workflow still needs a local capture tool such as dumpcap or tcpdump."
+        )
+    elif profile.key == "windows_remote":
+        capture_tier = "supported_with_limits" if supports_local_capture else "unsupported"
+        capture_detail = (
+            "Windows can still import or do basic local capture, but local capture is no longer the primary supported workflow."
+            if supports_local_capture
+            else "Windows local capture is not the main workflow and the required capture tools are missing."
+        )
+    else:
+        capture_tier = "supported_with_limits" if supports_local_capture else "unsupported"
+        capture_detail = (
+            "Local capture is present, but this platform remains experimental."
+            if supports_local_capture
+            else "Local capture tools are missing on this experimental platform."
+        )
+    rows.append(
+        WorkflowSupport(
+            area="local packet capture",
+            tier=capture_tier,
+            summary="Capture a pcap on the current machine.",
+            detail=capture_detail,
+        )
+    )
+
+    if profile.key in ("ubuntu_standalone", "pi_standalone"):
+        monitor_tier = "supported" if supports_monitor_toolchain else "unsupported"
+        monitor_detail = (
+            "Monitor-mode and Wi-Fi lab flows are part of the official Linux story when the toolchain and adapter are present."
+            if supports_monitor_toolchain
+            else "The official Linux Wi-Fi workflow still needs monitor-mode tooling and compatible hardware."
+        )
+    elif profile.key == "linux_best_effort":
+        monitor_tier = "supported_with_limits" if supports_monitor_toolchain else "unsupported"
+        monitor_detail = (
+            "Monitor-mode can be attempted here, but this Linux distro is outside the official support matrix."
+            if supports_monitor_toolchain
+            else "This best-effort Linux workflow still needs monitor-mode tooling and compatible hardware."
+        )
+    elif profile.key == "windows_remote":
+        monitor_tier = "supported_with_limits" if supports_monitor_toolchain else "unsupported"
+        monitor_detail = (
+            "Native Windows monitor-mode remains experimental and adapter-dependent even when helper tools are installed."
+            if supports_monitor_toolchain
+            else "Native Windows monitor-mode is not the supported path and the local helper tools are missing."
+        )
+    else:
+        monitor_tier = "supported_with_limits" if supports_monitor_toolchain else "unsupported"
+        monitor_detail = (
+            "Monitor-mode may be attempted here, but this platform remains experimental."
+            if supports_monitor_toolchain
+            else "Monitor-mode tooling is missing on this experimental platform."
+        )
+    rows.append(
+        WorkflowSupport(
+            area="monitor mode + Wi-Fi lab capture",
+            tier=monitor_tier,
+            summary="Run monitor-mode capture, handshake collection, and other Wi-Fi lab steps.",
+            detail=monitor_detail,
+        )
+    )
+
+    if profile.key == "windows_remote":
+        remote_tier = "supported" if supports_remote_control else "unsupported"
+        remote_detail = (
+            "Remote capture is the primary Windows workflow when SSH and SCP are available."
+            if supports_remote_control
+            else "The Windows remote workflow needs both ssh and scp installed locally."
+        )
+    elif profile.key in ("ubuntu_standalone", "pi_standalone", "linux_best_effort"):
+        remote_tier = "supported_with_limits" if supports_remote_control else "unsupported"
+        remote_detail = (
+            "Linux can act as a capture appliance too, but that is a secondary workflow here."
+            if supports_remote_control
+            else "This machine can only act as a remote capture appliance after ssh/scp tooling is available."
+        )
+    else:
+        remote_tier = "unsupported"
+        remote_detail = "Remote appliance control is not part of the official workflow on this platform."
+    rows.append(
+        WorkflowSupport(
+            area="remote capture control",
+            tier=remote_tier,
+            summary="Control a remote capture appliance and pull capture artifacts back.",
+            detail=remote_detail,
+        )
+    )
+
+    if supports_wifi_toolchain and profile.key in ("ubuntu_standalone", "pi_standalone", "windows_remote", "linux_best_effort"):
+        crack_tier = "supported_with_limits"
+        crack_detail = "Cracking and Wi-Fi decryption are available, but they still depend on handshake quality, passwords/wordlists, and hardware conditions."
+    elif supports_wifi_toolchain:
+        crack_tier = "supported_with_limits"
+        crack_detail = "Cracking tools are installed, but this platform remains outside the official Wi-Fi workflow."
+    else:
+        crack_tier = "unsupported"
+        crack_detail = "Cracking and Wi-Fi decryption need both aircrack-ng and airdecap-ng installed."
+    rows.append(
+        WorkflowSupport(
+            area="WPA cracking + Wi-Fi decrypt",
+            tier=crack_tier,
+            summary="Turn a usable handshake capture into decrypted packet data.",
+            detail=crack_detail,
+        )
+    )
+
+    decode_detail = "Decoding and candidate ranking are still heuristic because the pipeline may be dealing with unknown or encrypted payloads."
+    rows.append(
+        WorkflowSupport(
+            area="payload decoding",
+            tier="heuristic",
+            summary="Infer promising payload candidates from extracted traffic.",
+            detail=decode_detail,
+        )
+    )
+    rows.append(
+        WorkflowSupport(
+            area="replay + reconstruction",
+            tier="heuristic",
+            summary="Attempt to reconstruct or replay candidate output from the analysis results.",
+            detail="Replay and reconstruction remain heuristic even on the supported workflows and may still fail cleanly when the capture does not contain enough signal.",
+        )
+    )
+
+    return sorted(rows, key=lambda row: (_tier_sort_key(row.tier), row.area))
+
+
+def _host_hardware_qualification(profile: ProductProfile, config: Optional[Dict[str, object]] = None) -> HardwareQualification:
+    config = config or {}
+    arch = _machine_architecture()
+    remote_host = str(config.get("remote_host") or "").strip()
+
+    if profile.key == "windows_remote":
+        return HardwareQualification(
+            area="host",
+            label=f"Windows controller host ({arch})",
+            status="supported",
+            summary="Qualified controller/analyzer host for the official Windows workflow.",
+            detail="Keep packet capture on an Ubuntu or Raspberry Pi OS capture node; this Windows machine is the supported control and analysis side.",
+            monitor_mode="handled by Linux capture node",
+            injection="handled by Linux capture node",
+            channels="depends on remote node",
+        )
+
+    if profile.key == "ubuntu_standalone":
+        return HardwareQualification(
+            area="host",
+            label=f"Ubuntu standalone host ({arch})",
+            status="supported",
+            summary="Qualified full local host for the supported Ubuntu standalone workflow.",
+            detail="Ubuntu is the primary standalone Linux target and can also double as a Windows capture node when needed.",
+            monitor_mode="supported with a qualified adapter",
+            injection="qualified adapters only",
+            channels="adapter dependent",
+        )
+
+    if profile.key == "pi_standalone":
+        model = _linux_machine_model() or "Raspberry Pi"
+        return HardwareQualification(
+            area="host",
+            label=f"{model} host",
+            status="supported",
+            summary="Qualified compact/appliance host for the supported Raspberry Pi OS workflow.",
+            detail="Raspberry Pi OS is an official target, but the full Wi-Fi lab path still expects a qualified USB capture adapter rather than the typical onboard Broadcom radio.",
+            monitor_mode="supported with a qualified USB adapter",
+            injection="qualified USB adapters only",
+            channels="adapter dependent",
+        )
+
+    if profile.key == "linux_best_effort":
+        distro = linux_distribution_label() or f"Linux ({arch})"
+        return HardwareQualification(
+            area="host",
+            label=distro,
+            status="supported_with_limits",
+            summary="This Linux host can often run the pipeline, but the distro is outside the official matrix.",
+            detail="Ubuntu and Raspberry Pi OS are the only Linux targets we qualify end to end. Other distros stay best effort even with the right adapter.",
+            monitor_mode="toolchain dependent",
+            injection="adapter dependent",
+            channels="adapter dependent",
+        )
+
+    return HardwareQualification(
+        area="host",
+        label=f"macOS host ({arch})" if IS_MACOS else f"Unsupported host ({arch})",
+        status="unsupported",
+        summary="This host platform is outside the supported hardware program.",
+        detail="Stay on Ubuntu standalone, Raspberry Pi OS standalone, or Windows paired with a Linux capture node for the narrow supported path.",
+        monitor_mode="experimental",
+        injection="experimental",
+        channels="adapter dependent",
+    )
+
+
+def _windows_hardware_rows(config: Optional[Dict[str, object]] = None) -> List[HardwareQualification]:
+    config = config or {}
+    remote_host = str(config.get("remote_host") or "").strip()
+    remote_profile = str(config.get("remote_install_profile") or "appliance")
+    remote_status = "supported" if remote_host else "supported_with_limits"
+    remote_detail = (
+        f"Configured capture node: {remote_host}. Keep using the appliance profile for the most predictable Windows experience."
+        if remote_host
+        else "Run .\\setup_remote.ps1 or bootstrap-remote against an Ubuntu or Raspberry Pi OS node; that is the supported Windows capture path."
+    )
+    rows = [
+        HardwareQualification(
+            area="capture_node",
+            label="Ubuntu or Raspberry Pi OS capture node",
+            status=remote_status,
+            summary="The supported capture-node targets are Ubuntu standalone, Raspberry Pi OS standalone, or an appliance-profile remote node.",
+            detail=remote_detail,
+            monitor_mode="qualified on the Linux node with a supported adapter",
+            injection="qualified Linux USB adapters only",
+            channels="depends on node radio",
+        ),
+        HardwareQualification(
+            area="local_radio",
+            label="Native Windows 802.11 adapter",
+            status="unsupported",
+            summary="No native Windows adapter family is part of the official hardware program.",
+            detail="Even when NPcap and WlanHelper see the adapter, monitor and injection behavior stay driver dependent. Treat local Windows Wi-Fi capture as experimental only.",
+            monitor_mode="experimental",
+            injection="experimental",
+            channels="adapter dependent",
+        ),
+    ]
+    if remote_profile == "appliance":
+        rows[0] = HardwareQualification(
+            area=rows[0].area,
+            label=rows[0].label,
+            status=rows[0].status,
+            summary=rows[0].summary,
+            detail=rows[0].detail,
+            monitor_mode=rows[0].monitor_mode,
+            injection=rows[0].injection,
+            channels=f"{rows[0].channels}; appliance profile preferred",
+        )
+    return rows
+
+
+def _linux_hardware_rows(config: Optional[Dict[str, object]] = None) -> List[HardwareQualification]:
+    config = config or {}
+    profile = resolve_product_profile(config)
+    requested = str(config.get("interface") or "").strip()
+    seen: set[str] = set()
+    interface_rows: List[HardwareQualification] = []
+
+    candidates = list_interfaces()
+    if requested and not any(name == requested for _number, name, _description in candidates):
+        candidates = [("0", requested, "configured capture interface")] + candidates
+
+    for _number, name, description in candidates:
+        if name in seen:
+            continue
+        seen.add(name)
+        driver = _linux_interface_driver(name)
+        fingerprint = _linux_interface_fingerprint(name, description)
+        entry = _match_hardware_catalog(fingerprint, profile.key)
+
+        if entry:
+            interface_rows.append(
+                HardwareQualification(
+                    area="capture_adapter",
+                    label=f"{name} ({entry.family})",
+                    status=entry.status,
+                    summary=f"Driver `{driver or 'unknown'}` maps to the {entry.family} capture family.",
+                    detail=entry.detail,
+                    monitor_mode=entry.monitor_mode,
+                    injection=entry.injection,
+                    channels=entry.channels,
+                )
+            )
+            continue
+
+        if driver:
+            interface_rows.append(
+                HardwareQualification(
+                    area="capture_adapter",
+                    label=f"{name} ({driver})",
+                    status="unsupported",
+                    summary="This adapter family is not in the narrow qualified hardware list yet.",
+                    detail="It may still work for pcap-first or best-effort capture, but the full supported Wi-Fi lab path is only qualified for the documented Linux adapter families.",
+                    monitor_mode="unknown",
+                    injection="unknown",
+                    channels="unknown",
+                )
+            )
+        else:
+            interface_rows.append(
+                HardwareQualification(
+                    area="capture_adapter",
+                    label=name,
+                    status="supported_with_limits",
+                    summary="Wireless interface detected, but the driver family could not be fingerprinted from sysfs.",
+                    detail="Re-run on Linux with a configured interface if you want adapter qualification, or use the pcap-first flow until the adapter family is known.",
+                    monitor_mode="unknown",
+                    injection="unknown",
+                    channels="unknown",
+                )
+            )
+
+    if interface_rows:
+        return interface_rows
+
+    return [
+        HardwareQualification(
+            area="capture_adapter",
+            label="No wireless interface detected",
+            status="unsupported" if profile.key in ("ubuntu_standalone", "pi_standalone") else "supported_with_limits",
+            summary="The host is present, but no local wireless capture adapter was detected.",
+            detail="Standalone Linux needs a detectable wireless adapter for live capture. You can still use the pcap-first flow without one.",
+            monitor_mode="missing",
+            injection="missing",
+            channels="missing",
+        )
+    ]
+
+
+def hardware_qualification_report(config: Optional[Dict[str, object]] = None) -> List[HardwareQualification]:
+    profile = resolve_product_profile(config)
+    rows = [_host_hardware_qualification(profile, config)]
+    if profile.key == "windows_remote":
+        rows.extend(_windows_hardware_rows(config))
+    elif IS_LINUX:
+        rows.extend(_linux_hardware_rows(config))
+    else:
+        rows.append(
+            HardwareQualification(
+                area="capture_adapter",
+                label="Local wireless adapter",
+                status="unsupported",
+                summary="This platform is outside the supported local capture hardware program.",
+                detail="Use Ubuntu or Raspberry Pi OS for the capture side, or keep this machine in controller/analyzer mode only.",
+                monitor_mode="experimental",
+                injection="experimental",
+                channels="adapter dependent",
+            )
+        )
+    return sorted(rows, key=lambda row: (_tier_sort_key(row.status), row.area, row.label))
+
+
+def print_hardware_qualification(config: Optional[Dict[str, object]] = None) -> List[HardwareQualification]:
+    rows = hardware_qualification_report(config)
+    print(f"\n  {BOLD}Hardware Qualification{RESET}")
+    for row in rows:
+        if row.status == "supported":
+            status_text = f"{GREEN}{_tier_label(row.status)}{RESET}"
+        elif row.status == "supported_with_limits":
+            status_text = f"{YELLOW}{_tier_label(row.status)}{RESET}"
+        else:
+            status_text = f"{RED}{_tier_label(row.status)}{RESET}"
+        print(f"    {row.label:<34} {status_text}")
+        print(f"      {row.summary}")
+        print(f"      {row.detail}")
+        print(
+            "      "
+            f"monitor={row.monitor_mode}; injection={row.injection}; channels={row.channels}"
+        )
+    return rows
+
+
 def is_admin() -> bool:
     if IS_WINDOWS:
         try:
@@ -341,9 +932,9 @@ def relaunch_as_admin(argv: Optional[List[str]] = None) -> None:
         raise RuntimeError(f"UAC elevation failed with code {result}")
 
 
-def check_environment() -> bool:
+def check_environment(config: Optional[Dict[str, object]] = None) -> bool:
     section("Environment Check")
-    profile = resolve_product_profile()
+    profile = resolve_product_profile(config)
 
     if IS_WINDOWS:
         platform_tools = WINDOWS_TOOLS
@@ -357,10 +948,7 @@ def check_environment() -> bool:
     info(f"Active product profile: {profile.label}")
 
     for name, purpose, required in platform_tools:
-        if IS_WINDOWS and name.lower().startswith("wlanhelper"):
-            path = _find_windows_wlanhelper()
-        else:
-            path = shutil.which(name)
+        path = _tool_path(name)
         status = f"{CYAN}*{RESET}" if path else f"{DIM}-{RESET}"
         requirement = "required" if required else "optional"
         location = path or "not found on PATH"
@@ -401,6 +989,21 @@ def check_environment() -> bool:
     elif IS_MACOS:
         info("macOS support remains experimental; the official product modes are Ubuntu standalone, Raspberry Pi OS standalone, or Windows with Linux remote capture.")
         warn("macOS is not an officially supported standalone or capture-appliance target.")
+
+    print(f"\n  {BOLD}Workflow Tiers{RESET}")
+    for row in workflow_support_matrix(config):
+        if row.tier == "supported":
+            tier_text = f"{GREEN}{_tier_label(row.tier)}{RESET}"
+        elif row.tier == "supported_with_limits":
+            tier_text = f"{YELLOW}{_tier_label(row.tier)}{RESET}"
+        elif row.tier == "heuristic":
+            tier_text = f"{YELLOW}{_tier_label(row.tier)}{RESET}"
+        else:
+            tier_text = f"{RED}{_tier_label(row.tier)}{RESET}"
+        print(f"    {row.area:<30} {tier_text}")
+        print(f"      {row.detail}")
+
+    print_hardware_qualification(config)
 
     info("Long-term limit: replay, payload decoding, and reconstruction remain heuristic and are not guaranteed.")
 

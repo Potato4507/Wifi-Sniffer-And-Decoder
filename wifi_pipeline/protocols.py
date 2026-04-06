@@ -114,6 +114,204 @@ PAYLOAD_FAMILY_MAP = {
 }
 
 
+@dataclass(frozen=True)
+class ProtocolSupportProfile:
+    unit_type: str
+    family: str
+    decode_level: str
+    replay_level: str
+    replay_hint: str
+    detail: str
+
+
+PROTOCOL_SUPPORT_MAP = {
+    "plain_text": ProtocolSupportProfile(
+        unit_type="plain_text",
+        family="text",
+        decode_level="guaranteed",
+        replay_level="guaranteed",
+        replay_hint="txt",
+        detail="UTF-8-ish plain-text payloads are the most deterministic replay target in this pipeline.",
+    ),
+    "command_text": ProtocolSupportProfile(
+        unit_type="command_text",
+        family="text",
+        decode_level="guaranteed",
+        replay_level="guaranteed",
+        replay_hint="txt",
+        detail="Command-style text is treated as a supported text replay family.",
+    ),
+    "json_text": ProtocolSupportProfile(
+        unit_type="json_text",
+        family="text",
+        decode_level="guaranteed",
+        replay_level="guaranteed",
+        replay_hint="json",
+        detail="JSON payloads map cleanly into deterministic file reconstruction.",
+    ),
+    "xml_text": ProtocolSupportProfile(
+        unit_type="xml_text",
+        family="text",
+        decode_level="guaranteed",
+        replay_level="guaranteed",
+        replay_hint="xml",
+        detail="XML payloads map cleanly into deterministic file reconstruction.",
+    ),
+    "http_text": ProtocolSupportProfile(
+        unit_type="http_text",
+        family="text",
+        decode_level="guaranteed",
+        replay_level="guaranteed",
+        replay_hint="txt",
+        detail="HTTP text payloads are reconstructed as deterministic text artifacts.",
+    ),
+    "rtsp_text": ProtocolSupportProfile(
+        unit_type="rtsp_text",
+        family="text",
+        decode_level="guaranteed",
+        replay_level="guaranteed",
+        replay_hint="txt",
+        detail="RTSP control text is reconstructed as deterministic text artifacts.",
+    ),
+    "png_image": ProtocolSupportProfile(
+        unit_type="png_image",
+        family="image",
+        decode_level="guaranteed",
+        replay_level="guaranteed",
+        replay_hint="png",
+        detail="PNG signatures are strong enough to treat decode and replay as deterministic file output.",
+    ),
+    "gif_image": ProtocolSupportProfile(
+        unit_type="gif_image",
+        family="image",
+        decode_level="guaranteed",
+        replay_level="guaranteed",
+        replay_hint="gif",
+        detail="GIF signatures are treated as deterministic file reconstruction targets.",
+    ),
+    "bmp_image": ProtocolSupportProfile(
+        unit_type="bmp_image",
+        family="image",
+        decode_level="guaranteed",
+        replay_level="guaranteed",
+        replay_hint="bmp",
+        detail="BMP payloads are treated as deterministic file reconstruction targets.",
+    ),
+    "webp_image": ProtocolSupportProfile(
+        unit_type="webp_image",
+        family="image",
+        decode_level="guaranteed",
+        replay_level="guaranteed",
+        replay_hint="webp",
+        detail="WEBP payloads are treated as deterministic file reconstruction targets.",
+    ),
+    "jpeg_frame": ProtocolSupportProfile(
+        unit_type="jpeg_frame",
+        family="image",
+        decode_level="high_confidence",
+        replay_level="high_confidence",
+        replay_hint="jpeg",
+        detail="JPEG frame signatures are strong, but aggregate replay still depends on frame completeness and ordering.",
+    ),
+    "wav_audio": ProtocolSupportProfile(
+        unit_type="wav_audio",
+        family="audio",
+        decode_level="high_confidence",
+        replay_level="high_confidence",
+        replay_hint="wav",
+        detail="Audio container signatures are strong, but stream completeness still matters for replay quality.",
+    ),
+    "mp3_audio": ProtocolSupportProfile(
+        unit_type="mp3_audio",
+        family="audio",
+        decode_level="high_confidence",
+        replay_level="high_confidence",
+        replay_hint="mp3",
+        detail="MP3 signatures are strong, but replay quality still depends on unit ordering and completeness.",
+    ),
+    "ogg_audio": ProtocolSupportProfile(
+        unit_type="ogg_audio",
+        family="audio",
+        decode_level="high_confidence",
+        replay_level="high_confidence",
+        replay_hint="ogg",
+        detail="Ogg payloads are supported with high confidence rather than guaranteed stream reconstruction.",
+    ),
+    "flac_audio": ProtocolSupportProfile(
+        unit_type="flac_audio",
+        family="audio",
+        decode_level="high_confidence",
+        replay_level="high_confidence",
+        replay_hint="flac",
+        detail="FLAC payloads are supported with high confidence rather than guaranteed stream reconstruction.",
+    ),
+    "aac_audio": ProtocolSupportProfile(
+        unit_type="aac_audio",
+        family="audio",
+        decode_level="high_confidence",
+        replay_level="high_confidence",
+        replay_hint="aac",
+        detail="AAC/ADTS payloads are supported with high confidence rather than guaranteed stream reconstruction.",
+    ),
+    "pdf_document": ProtocolSupportProfile(
+        unit_type="pdf_document",
+        family="document",
+        decode_level="high_confidence",
+        replay_level="high_confidence",
+        replay_hint="pdf",
+        detail="PDF signatures are strong, but full-document reconstruction still depends on capture completeness.",
+    ),
+    "zip_archive": ProtocolSupportProfile(
+        unit_type="zip_archive",
+        family="archive",
+        decode_level="high_confidence",
+        replay_level="high_confidence",
+        replay_hint="zip",
+        detail="Archive signatures are strong, but replay remains contingent on full payload capture.",
+    ),
+    "gzip_archive": ProtocolSupportProfile(
+        unit_type="gzip_archive",
+        family="archive",
+        decode_level="high_confidence",
+        replay_level="high_confidence",
+        replay_hint="gzip",
+        detail="Gzip signatures are strong, but replay remains contingent on full payload capture.",
+    ),
+    "mpegts_packet": ProtocolSupportProfile(
+        unit_type="mpegts_packet",
+        family="video",
+        decode_level="high_confidence",
+        replay_level="high_confidence",
+        replay_hint="mpegts",
+        detail="MPEG-TS packets have strong boundaries, but usable replay still depends on packet continuity and capture quality.",
+    ),
+    "h264_nal": ProtocolSupportProfile(
+        unit_type="h264_nal",
+        family="video",
+        decode_level="high_confidence",
+        replay_level="high_confidence",
+        replay_hint="h264",
+        detail="H.264 NAL units are a strong signal, but access-unit ordering still matters for smooth replay.",
+    ),
+    "h265_nal": ProtocolSupportProfile(
+        unit_type="h265_nal",
+        family="video",
+        decode_level="high_confidence",
+        replay_level="high_confidence",
+        replay_hint="h265",
+        detail="H.265 NAL units are a strong signal, but access-unit ordering still matters for smooth replay.",
+    ),
+    "opaque_chunk": ProtocolSupportProfile(
+        unit_type="opaque_chunk",
+        family="opaque",
+        decode_level="heuristic",
+        replay_level="unsupported",
+        replay_hint="raw",
+        detail="Opaque chunks remain outside the supported protocol family registry and should not be treated as a deterministic replay target.",
+    ),
+}
+
+
 @dataclass
 class RtpHeader:
     payload_type: int
@@ -448,6 +646,53 @@ def payload_family(unit_type: str) -> str:
 
 def suggested_extension(unit_type: str) -> str:
     return PAYLOAD_EXTENSION_MAP.get(unit_type, ".bin")
+
+
+def protocol_support(unit_type: str) -> ProtocolSupportProfile:
+    normalized = str(unit_type or "opaque_chunk")
+    return PROTOCOL_SUPPORT_MAP.get(
+        normalized,
+        ProtocolSupportProfile(
+            unit_type=normalized,
+            family=payload_family(normalized),
+            decode_level="heuristic",
+            replay_level="unsupported",
+            replay_hint="raw",
+            detail="This unit type is not in the supported protocol family registry yet.",
+        ),
+    )
+
+
+def summarize_stream_support(unit_type_counts: Dict[str, int]) -> Dict[str, object]:
+    counts = dict(unit_type_counts or {})
+    if not counts:
+        profile = protocol_support("opaque_chunk")
+        return {
+            "dominant_unit_type": profile.unit_type,
+            "family": profile.family,
+            "decode_level": profile.decode_level,
+            "replay_level": profile.replay_level,
+            "replay_hint": profile.replay_hint,
+            "detail": profile.detail,
+            "unit_types": [],
+        }
+
+    dominant = max(counts.items(), key=lambda item: item[1])[0]
+    profile = protocol_support(dominant)
+    replay_levels = [protocol_support(unit_type).replay_level for unit_type in counts]
+    decode_levels = [protocol_support(unit_type).decode_level for unit_type in counts]
+    order = {"guaranteed": 0, "high_confidence": 1, "heuristic": 2, "unsupported": 3}
+    strongest_decode = max(decode_levels, key=lambda level: order.get(level, 99))
+    strongest_replay = max(replay_levels, key=lambda level: order.get(level, 99))
+    return {
+        "dominant_unit_type": dominant,
+        "family": profile.family,
+        "decode_level": strongest_decode,
+        "replay_level": strongest_replay,
+        "replay_hint": profile.replay_hint,
+        "detail": profile.detail,
+        "unit_types": sorted(counts),
+    }
 
 
 def summarize_protocol_hits(chunks: Sequence[bytes]) -> Dict[str, int]:

@@ -11,6 +11,7 @@ from .protocols import (
     guess_unit_type,
     payload_family,
     shannon_entropy,
+    summarize_stream_support,
     summarize_protocol_hits,
 )
 from .ui import done, err, info, ok, section, warn
@@ -182,6 +183,8 @@ def _classify_stream_candidate(
     else:
         candidate_class = "background_transport"
 
+    support_summary = summarize_stream_support(unit_type_counts)
+
     return {
         "stream_id": stream.get("stream_id"),
         "flow_id": stream.get("flow_id"),
@@ -198,6 +201,7 @@ def _classify_stream_candidate(
             "payload_families": sorted(family for family in payload_families if family != "opaque"),
             "unit_type_counts": unit_type_counts,
             "custom_magic_hits": custom_magic_hits,
+            "protocol_support": support_summary,
             "reasons": reasons,
         }
 
@@ -290,6 +294,7 @@ class FormatDetector:
             "rtsp_control_events": len(rtsp_controls),
             "custom_magic_hex": _normalized_hex(self.config.get("custom_magic_hex")),
             "selected_candidate_stream": stream_scores[0] if stream_scores else None,
+            "selected_protocol_support": (stream_scores[0] or {}).get("protocol_support") if stream_scores else None,
             "top_streams": stream_scores[:10],
         }
 
@@ -472,6 +477,11 @@ class CryptoAnalyzer:
                     f"Focusing analysis on candidate stream {selected_stream['stream_id']} "
                     f"[{selected_stream['candidate_class']}, score={selected_stream['score']}]"
                 )
+        selected_protocol_support = (
+            dict(selected_stream.get("protocol_support") or {})
+            if selected_stream
+            else summarize_stream_support({})
+        )
 
         corpus_review_threshold = float(self.config.get("corpus_review_threshold", 0.62) or 0.62)
         corpus_auto_reuse_threshold = float(self.config.get("corpus_auto_reuse_threshold", 0.88) or 0.88)
@@ -506,6 +516,23 @@ class CryptoAnalyzer:
             "Modern authenticated encryption can still look uniform here and remain completely impractical to decode.",
         ]
         recommendations: List[str] = []
+
+        replay_level = str(selected_protocol_support.get("replay_level") or "unsupported")
+        if replay_level == "unsupported":
+            limitations.append(
+                "The selected stream does not map to a supported replay family; replay should be treated as unsupported rather than merely weak."
+            )
+            recommendations.append(
+                "Prefer text, image, audio, archive, document, or recognized video families if you want supported reconstruction and replay."
+            )
+        elif replay_level == "heuristic":
+            recommendations.append(
+                "Replay stays heuristic for this protocol family. Validate output manually before treating it as decoded content."
+            )
+        elif replay_level == "high_confidence":
+            recommendations.append(
+                "Replay is a supported high-confidence path here, but capture completeness and ordering still matter."
+            )
 
         if chi_value < 300:
             hypotheses.append(
@@ -655,6 +682,7 @@ class CryptoAnalyzer:
             "total_units": len(encrypted_units),
             "average_unit_size": int(sum(len(payload) for payload in encrypted_payloads) / len(encrypted_payloads)),
             "selected_candidate_stream": selected_stream,
+            "selected_protocol_support": selected_protocol_support,
             "ciphertext_observations": {
                 "chi_squared": chi_value,
                 "average_entropy": mean_entropy,

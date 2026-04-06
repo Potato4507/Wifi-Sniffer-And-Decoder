@@ -41,6 +41,153 @@ What this means in practice:
 - Local Windows capture still exists, but it is no longer an official product mode
 - Windows monitor-mode and Wi-Fi lab helpers are best-effort, not the main promise of the repo
 
+## Supported hardware qualification
+
+The supported hardware program is intentionally narrow. We would rather tell you exactly which hosts and adapter families we qualify than pretend every radio behaves the same.
+
+Use either of these commands to see the live qualification report for the current machine:
+
+```bash
+python videopipeline.py deps
+python videopipeline.py hardware
+```
+
+Qualified hardware families:
+
+| Host or adapter family | Status | Why |
+|---|---|---|
+| Ubuntu host (`x86_64` or `arm64`) | Supported | Official standalone target and official Linux capture-node target |
+| Raspberry Pi OS host (Pi 4/5 style appliance) | Supported | Official compact/appliance target |
+| Atheros `AR9271` / `ath9k_htc` | Supported | Narrow best-known Linux USB adapter family for monitor mode and injection |
+| MediaTek `MT7612U` / `mt76x2u` | Supported with limits | Strong dual-band Linux option, but injection/firmware behavior still varies |
+| Ralink or MediaTek `RT5572` / `rt2800usb` | Supported with limits | Common dual-band Linux option; keep injection expectations conservative |
+| Intel `iwlwifi` family | Supported with limits | Useful for pcap-first and sniffing workflows, but not the narrow recommended lab adapter family |
+| Broadcom `brcmfmac` onboard Raspberry Pi radios | Unsupported for the full lab path | Fine for some general wireless tasks, but not part of the qualified monitor/injection hardware program |
+| Native Windows 802.11 adapters | Unsupported as an official capture target | Keep Windows in the controller/analyzer role and move raw capture to Linux |
+
+This is the current hardware story:
+
+- `Ubuntu standalone` and `Raspberry Pi OS standalone` are the only local capture hosts we qualify end to end
+- `Windows 10/11` is qualified as the controller/analyzer host, not as the official raw-capture host
+- When in doubt, pair Windows with a Linux appliance node and a qualified USB capture adapter
+
+## WPA crack readiness
+
+WPA recovery is no longer treated as a vague "maybe." The pipeline now classifies the current crack/decrypt path into one of four states:
+
+- `known_key_supplied`
+- `known_wordlist_attack_supported`
+- `captured_handshake_insufficient`
+- `unsupported`
+
+Use:
+
+```bash
+python videopipeline.py crack-status
+python videopipeline.py crack-status --cap /path/to/handshake.cap
+```
+
+The readiness check looks at:
+
+- whether a handshake artifact actually exists
+- whether that artifact is large enough to be worth attempting
+- whether a known PSK is already configured
+- whether a real wordlist attack path exists (`aircrack-ng` or `hashcat` plus conversion tooling)
+- whether `ap_essid` and `airdecap-ng` are present for the decrypt step
+
+That means the project now fails earlier and more honestly when the problem is "handshake too small" or "wordlist/tooling is missing," instead of just trying the crack path and hoping.
+
+## Supported decode and replay families
+
+Decode and replay are no longer treated as one giant heuristic bucket. The pipeline now classifies the dominant payload family for the selected stream and reports explicit support levels:
+
+- `guaranteed`
+- `high_confidence`
+- `heuristic`
+- `unsupported`
+
+Current narrow support model:
+
+| Dominant unit type | Decode | Replay | Notes |
+|---|---|---|---|
+| `plain_text`, `json_text`, `xml_text`, `http_text`, `rtsp_text`, `command_text` | Guaranteed | Guaranteed | Best deterministic reconstruction path |
+| `png_image`, `gif_image`, `bmp_image`, `webp_image` | Guaranteed | Guaranteed | Strong signatures and direct file reconstruction |
+| `jpeg_frame`, `wav_audio`, `mp3_audio`, `ogg_audio`, `flac_audio`, `aac_audio`, `pdf_document`, `zip_archive`, `gzip_archive`, `mpegts_packet`, `h264_nal`, `h265_nal` | High confidence | High confidence | Strong signatures, but continuity and capture quality still matter |
+| `opaque_chunk` or unknown families | Heuristic | Unsupported | We still analyze them, but we do not present them as supported replay targets |
+
+You will see these levels in:
+
+- `python videopipeline.py detect`
+- `python videopipeline.py analyze`
+- `python videopipeline.py play`
+- the dashboard and latest-report summary views
+
+## Pipeline preflight
+
+Before long-running decode or replay work, the project can now tell you exactly why the current path is ready, limited, or blocked:
+
+```bash
+python videopipeline.py preflight
+```
+
+The preflight check combines:
+
+- capture quality and selected-stream strength
+- replay-family support level
+- whether analysis actually produced replay material
+- WPA crack/decrypt readiness when the current workflow is Wi-Fi related
+
+Instead of blindly starting replay, the pipeline now gives exact blockers and next steps like:
+
+- no selected candidate stream
+- selected stream too thin
+- replay family unsupported
+- no replay material was produced
+- handshake too small
+- missing wordlist, ESSID, or decrypt tooling
+
+## Release gate
+
+The release workflow now expects a real validation matrix under `validation_matrix/`.
+
+Run it locally with:
+
+```bash
+python scripts/release_gate.py \
+  --ubuntu-report validation_matrix/ubuntu_standalone_validation.json \
+  --pi-report validation_matrix/pi_standalone_validation.json \
+  --windows-report validation_matrix/windows_remote_validation.json \
+  --sample-report validation_matrix/sample_text_analysis.json \
+  --sample-report validation_matrix/sample_video_analysis.json
+```
+
+Or through the CLI:
+
+```bash
+python videopipeline.py release-gate \
+  --ubuntu-report validation_matrix/ubuntu_standalone_validation.json \
+  --pi-report validation_matrix/pi_standalone_validation.json \
+  --windows-report validation_matrix/windows_remote_validation.json \
+  --sample-report validation_matrix/sample_text_analysis.json \
+  --sample-report validation_matrix/sample_video_analysis.json
+```
+
+That gate requires:
+
+- `validation_matrix/ubuntu_standalone_validation.json`
+- `validation_matrix/pi_standalone_validation.json`
+- `validation_matrix/windows_remote_validation.json`
+- one or more supported sample analysis reports with non-blocked replay feasibility
+
+If those artifacts are missing or blocked, the tag-based release workflow now fails on purpose.
+
+Recommended release-closeout order:
+
+1. collect `validate-local` and `validate-remote` reports into `validation_matrix/`
+2. copy one or more supported sample `analysis_report.json` files into `validation_matrix/`
+3. run `python scripts/release_gate.py ...`
+4. only tag a release after the gate says `fully validated`
+
 ## Start here
 
 Use the installer that matches the machine you are sitting at:
@@ -98,6 +245,8 @@ sudo python3 videopipeline.py wifi
 ```
 
 Windows is an official controller/analyzer target only when paired with Ubuntu or Raspberry Pi OS over SSH. `.\setup_remote.ps1` wraps the Windows-first flow: local install, guided remote setup, and saved config.
+
+If you have already bootstrapped an appliance profile on the remote box, `.\setup_remote.ps1` can now discover it automatically from the health endpoint when no `-Host` is provided.
 
 If you prefer the raw installer/CLI route, the equivalent sequence is:
 
@@ -177,23 +326,60 @@ Bootstrap the remote device from Windows first:
 python .\videopipeline.py bootstrap-remote --host pi@raspberrypi
 ```
 
+You can choose how the remote install lands:
+
+- `--install-mode auto` chooses the bundle path when `scp` is available, otherwise falls back to the native inline bootstrap
+- `--install-mode bundle` uploads the self-contained agent bundle and installs it on the remote box
+- `--install-mode native` keeps using the inline SSH bootstrap script
+- `--install-profile appliance` enables the systemd-based appliance profile with a health endpoint
+- `--install-profile standard` leaves the remote box in the lighter managed-agent mode without the appliance extras
+
+For example:
+
+```powershell
+python .\videopipeline.py bootstrap-remote --host pi@raspberrypi --install-mode bundle --install-profile appliance
+```
+
+To discover appliance nodes from Windows before pairing:
+
+```powershell
+python .\videopipeline.py discover-remote
+```
+
 That will:
 
 - install `tcpdump` on the remote device when a supported package manager is available
 - create `~/wifi-pipeline/captures`
 - create `~/wifi-pipeline/state`
+- install a managed capture agent at `~/wifi-pipeline/bin/wifi-pipeline-agent`
 - install a helper command at `~/wifi-pipeline/bin/wifi-pipeline-capture`
 - install a managed service command at `~/wifi-pipeline/bin/wifi-pipeline-service`
+- symlink it into `~/.local/bin/wifi-pipeline-agent`
 - symlink it into `~/.local/bin/wifi-pipeline-capture`
 - symlink it into `~/.local/bin/wifi-pipeline-service`
 - write completion markers and SHA-256 metadata for service-generated captures
 - try to install a constrained privileged runner at `/usr/local/bin/wifi-pipeline-capture-privileged`
 - try to add a matching sudoers rule so `start-remote` can capture without an interactive password prompt
 
+The managed agent is now a shell-based self-contained runtime, so the remote capture box does not need a local Python install just to run the control path.
+
+With `--install-profile appliance`, bootstrap also:
+
+- installs a systemd appliance unit so the capture box comes back up in a known-good state after reboot
+- installs a socket-activated health endpoint on port `8741` by default
+- writes appliance metadata under `~/wifi-pipeline/state/appliance.env`
+
+You can check the appliance health endpoint from another machine with:
+
+```bash
+curl http://raspberrypi:8741/health
+```
+
 On the Linux capture device:
 
 ```bash
-wifi-pipeline-capture --interface wlan0 --duration 60
+wifi-pipeline-agent doctor --interface wlan0
+wifi-pipeline-agent service start --interface wlan0 --duration 60
 ```
 
 Back on Windows:
@@ -232,7 +418,7 @@ Or, if you already have a capture file on the remote device:
 python .\videopipeline.py remote --host pi@raspberrypi --path /home/pi/wifi-pipeline/captures/ --run all
 ```
 
-`start-remote` is the most complete one-shot flow: it starts the remote capture helper, waits for the timed capture to finish, checks the remote completion marker and checksum metadata, pulls the exact file back, verifies the transfer, and runs the local stages you choose.
+`start-remote` is the most complete one-shot flow: it talks to the managed capture agent on the remote box, waits for the timed capture to finish, checks the remote completion marker and checksum metadata, pulls the exact file back, verifies the transfer, and runs the local stages you choose.
 
 If you want the remote box to behave more like an appliance, you can drive the managed service directly:
 
@@ -243,7 +429,15 @@ python .\videopipeline.py remote-service last-capture --host pi@raspberrypi
 python .\videopipeline.py remote-service stop --host pi@raspberrypi
 ```
 
-That service keeps state under `~/wifi-pipeline/state`, tracks the last completed capture, and gives `start-remote` a stable control surface instead of relying on a one-off shell command.
+That service keeps state under `~/wifi-pipeline/state`, tracks the last completed capture, and now sits behind the managed capture agent instead of relying on ad-hoc shell orchestration.
+
+If you want to pre-build the remote runtime for release packaging or manual transfer, run:
+
+```powershell
+python .\scripts\build_agent_bundle.py
+```
+
+That writes a self-contained `wifi-pipeline-agent-<version>-bundle.tar.gz` archive under `dist\`.
 
 `setup_remote.ps1` is the Windows-first first-run wizard. It prompts for the remote host, interface, and local import directory, saves those values to `lab.json`, runs pairing, bootstraps the remote appliance, and finishes with doctor. Add `-SmokeTest` if you want it to run a short remote capture at the end.
 
@@ -413,7 +607,7 @@ These are intentional boundaries of the project as it stands today:
 | Adapter-independent Windows 802.11 parity with Linux | Not achievable here | Driver and hardware limits cannot be removed in software |
 | Other Linux distributions outside Ubuntu and Raspberry Pi OS | Best effort only | They may work, but they are not part of the official support matrix |
 | Remote capture on devices without a normal shell toolchain | Unsupported | The remote helper assumes SSH, bash, nohup, sudo/capabilities, and standard filesystem tools |
-| Guaranteed WPA cracking, payload decoding, or replay | Unsupported | Analysis and replay are heuristic and may require manual tuning in `lab.json` |
+| Guaranteed WPA cracking, payload decoding, or replay | Unsupported | WPA and replay now report explicit support states, but universal cracking/decoding/replay is still not realistic |
 
 Long-term limits that still apply even on the supported path:
 
@@ -443,9 +637,14 @@ If you want the most reliable experience, stay on one of the official product mo
 | Command | What it does |
 |---|---|
 | `python videopipeline.py` | Open the guided menu |
-| `python videopipeline.py deps` | Check tools and Python packages |
+| `python videopipeline.py deps` | Check tools, workflow support tiers, hardware qualification, and Python packages |
+| `python videopipeline.py hardware` | Print the supported hardware qualification report for the current machine |
+| `python videopipeline.py preflight` | Fail early with exact replay/WPA blockers before long-running decode or replay work |
+| `python videopipeline.py release-gate [--sample-report ...]` | Require the real validation matrix and supported sample analysis reports before calling a release fully validated |
+| `python videopipeline.py crack-status [--cap handshake.cap]` | Show whether the WPA crack/decrypt path is actually ready, limited, or blocked |
+| `python videopipeline.py discover-remote [--network 192.168.1.0/24]` | Discover appliance-style capture nodes from their health endpoint |
 | `python videopipeline.py pair-remote --host ...` | Install your SSH key on a remote capture device |
-| `python videopipeline.py bootstrap-remote --host ...` | Prepare a Pi/Linux capture device and install the helper script |
+| `python videopipeline.py bootstrap-remote --host ... [--install-mode auto|native|bundle] [--install-profile standard|appliance]` | Prepare a Pi/Linux capture device and install the managed capture agent/service |
 | `python videopipeline.py setup-remote --host ... --interface wlan0` | Run the guided first-run setup flow and save the official Windows remote-capture config |
 | `python videopipeline.py start-remote --host ... --interface wlan0 --duration 60 --run all` | Run the official Windows remote-capture flow, pull it back, and process it |
 | `python videopipeline.py validate-remote --host ... --interface wlan0` | Run the official Windows remote-capture validation flow and write a JSON validation report |
