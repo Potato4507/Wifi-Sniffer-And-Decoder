@@ -3,15 +3,17 @@
 # Supports Linux (apt-based) and macOS (Homebrew)
 # Usage:
 #   chmod +x install_deps.sh
-#   ./install_deps.sh              # Python venv + pip only
-#   ./install_deps.sh --full       # Also install system packages (requires sudo / brew)
+#   ./install_deps.sh              # Install system packages + Python venv + pip
+#   ./install_deps.sh --no-system  # Skip system packages
+#   ./install_deps.sh --full       # Same as default (kept for compatibility)
 
 set -euo pipefail
 
-FULL=0
+FULL=1
 for arg in "$@"; do
     case "$arg" in
         --full) FULL=1 ;;
+        --no-system) FULL=0 ;;
         *) echo "Unknown argument: $arg"; exit 1 ;;
     esac
 done
@@ -37,9 +39,11 @@ if [[ "$FULL" -eq 1 ]]; then
             aircrack-ng \
             hashcat \
             hcxtools \
+            openssh-client \
             tcpdump \
             wireshark \
             tshark \
+            ffmpeg \
             python3-pip \
             python3-venv
         echo "[+] System packages installed."
@@ -50,7 +54,7 @@ if [[ "$FULL" -eq 1 ]]; then
             exit 1
         fi
         echo "[*] Installing system packages via Homebrew ..."
-        brew install aircrack-ng hashcat hcxtools
+        brew install aircrack-ng hashcat hcxtools ffmpeg
         # Wireshark is a cask (GUI app); tshark/dumpcap come with it
         brew install --cask wireshark || true
         echo "[+] System packages installed."

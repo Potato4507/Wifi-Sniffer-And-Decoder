@@ -14,6 +14,7 @@ from .corpus import CorpusStore
 from .environment import IS_MACOS, IS_WINDOWS, check_environment
 from .extract import StreamExtractor
 from .playback import ExperimentalPlayback, infer_replay_hint, reconstruct_from_capture
+from .remote import pull_remote_capture, watch_remote_capture
 from .ui import (
     BOLD, CYAN, DIM, GREEN, RED, RESET, YELLOW,
     ask, banner, choose, confirm, done, err, info, section, warn,
@@ -86,6 +87,16 @@ def _candidate_rows(config: Dict[str, object]) -> list[Dict[str, object]]:
     if not manifest:
         return []
     return _rank_candidate_streams(manifest, config)
+
+
+def _run_after_pull(config: Dict[str, object], pcap_path: str, mode: str) -> None:
+    run_extract(config, pcap_path)
+    if mode in ("detect", "analyze", "play", "all"):
+        run_detect(config)
+    if mode in ("analyze", "play", "all"):
+        run_analyze(config, None)
+    if mode in ("play", "all"):
+        run_play(config)
 
 
 # ---------------------------------------------------------------------------
@@ -452,25 +463,26 @@ def interactive_menu(config: Dict[str, object]) -> int:
         options = [
             "Guided setup / configure device",                    # 0
             "Capture traffic (dumpcap / tcpdump fallback)",       # 1
-            "Monitor mode capture (airodump/besside/tcpdump)",   # 2
-            "Crack WPA2 + decrypt pcap",                          # 3
-            "Strip Wi-Fi layer on an existing pcap",              # 4
-            "Extract payload streams from a pcap",                # 5
-            "Run payload detection",                              # 6
-            "Review candidate payloads",                          # 7
-            "Pin a preferred candidate stream",                   # 8
-            "Edit custom stream hints",                           # 9
-            "Run cipher heuristics",                              # 10
-            "Start experimental replay / reconstruction",         # 11
-            "Run full pipeline (dumpcap / tcpdump capture)",      # 12
-            "Run full Wi-Fi pipeline (monitor + crack + decrypt)",# 13
-            "Show latest report summary",                         # 14
-            "Show corpus archive",                                # 15
-            "Launch web dashboard",                               # 16
-            "Check environment",                                  # 17
-            "Exit",                                               # 18
+            "Pull remote capture (SSH/SCP)",                      # 2
+            "Monitor mode capture (airodump/besside/tcpdump)",   # 3
+            "Crack WPA2 + decrypt pcap",                          # 4
+            "Strip Wi-Fi layer on an existing pcap",              # 5
+            "Extract payload streams from a pcap",                # 6
+            "Run payload detection",                              # 7
+            "Review candidate payloads",                          # 8
+            "Pin a preferred candidate stream",                   # 9
+            "Edit custom stream hints",                           # 10
+            "Run cipher heuristics",                              # 11
+            "Start experimental replay / reconstruction",         # 12
+            "Run full pipeline (dumpcap / tcpdump capture)",      # 13
+            "Run full Wi-Fi pipeline (monitor + crack + decrypt)",# 14
+            "Show latest report summary",                         # 15
+            "Show corpus archive",                                # 16
+            "Launch web dashboard",                               # 17
+            "Check environment",                                  # 18
+            "Exit",                                               # 19
         ]
-        default = 11 if has_candidate else (1 if IS_WINDOWS else 2)
+        default = 12 if has_candidate else (1 if IS_WINDOWS else 3)
         selection = choose("Select an action", options, default=default)
 
         if selection == 0:
@@ -479,46 +491,56 @@ def interactive_menu(config: Dict[str, object]) -> int:
             strip_wifi = confirm("Run Wi-Fi layer strip after capture?", default=bool(resolve_wpa_password(config)))
             run_capture(config, strip_wifi=strip_wifi)
         elif selection == 2:
+            host = ask("Remote host (user@host)", str(config.get("remote_host") or ""))
+            path = ask("Remote path (file or directory)", str(config.get("remote_path") or ""))
+            latest_only = confirm("Pull latest file from a directory/pattern?", default=True)
+            run_mode = ask("Run stage after pull? (none/extract/detect/analyze/play/all)", "all").strip().lower()
+            if run_mode not in ("none", "extract", "detect", "analyze", "play", "all"):
+                run_mode = "none"
+            pulled = pull_remote_capture(config, host=host, path=path, latest_only=latest_only)
+            if pulled and run_mode != "none":
+                _run_after_pull(config, str(pulled), run_mode)
+        elif selection == 3:
             method = ask("Capture method (airodump/besside/tcpdump)", str(config.get("monitor_method") or "airodump"))
             run_monitor(config, method=method)
-        elif selection == 3:
+        elif selection == 4:
             cap = ask("Path to handshake .cap (blank = auto-detect)", "").strip() or None
             run_crack_decrypt(config, handshake_cap=cap)
-        elif selection == 4:
+        elif selection == 5:
             source = input("  > Path to existing pcap: ").strip()
             if source:
                 Capture(config).strip_wifi_layer(source)
-        elif selection == 5:
+        elif selection == 6:
             source = ask("Path to pcap (blank = auto)", "").strip() or None
             run_extract(config, source)
-        elif selection == 6:
-            run_detect(config)
         elif selection == 7:
-            _show_candidate_streams(config)
+            run_detect(config)
         elif selection == 8:
-            config = _pick_preferred_stream(config)
+            _show_candidate_streams(config)
         elif selection == 9:
-            config = _edit_device_hints(config)
+            config = _pick_preferred_stream(config)
         elif selection == 10:
+            config = _edit_device_hints(config)
+        elif selection == 11:
             decrypted = input("  > Directory of decrypted reference units (optional): ").strip() or None
             run_analyze(config, decrypted)
-        elif selection == 11:
-            run_play(config)
         elif selection == 12:
+            run_play(config)
+        elif selection == 13:
             decrypted = input("  > Directory of decrypted reference units (optional): ").strip() or None
             strip_wifi = confirm("Strip the Wi-Fi layer when possible?", default=bool(resolve_wpa_password(config)))
             run_all(config, None, decrypted, strip_wifi)
-        elif selection == 13:
+        elif selection == 14:
             decrypted = input("  > Directory of decrypted reference units (optional): ").strip() or None
             method = ask("Capture method (airodump/besside/tcpdump)", str(config.get("monitor_method") or "airodump"))
             run_all_wifi(config, decrypted_dir=decrypted, method=method)
-        elif selection == 14:
-            _show_report_summary(config)
         elif selection == 15:
-            _show_corpus_summary(config)
+            _show_report_summary(config)
         elif selection == 16:
-            serve_dashboard()
+            _show_corpus_summary(config)
         elif selection == 17:
+            serve_dashboard()
+        elif selection == 18:
             check_environment()
         else:
             info("Goodbye.")
@@ -561,6 +583,18 @@ def build_parser() -> argparse.ArgumentParser:
     # ── WPA2 crack + decrypt ─────────────────────────────────────────────────
     crack_p = subparsers.add_parser("crack", help="Crack WPA2 PSK from a handshake capture then decrypt with airdecap-ng")
     crack_p.add_argument("--cap", default=None, help="Path to handshake .cap file (auto-detected if omitted)")
+
+    # ── Remote capture pull (SSH/SCP) ────────────────────────────────────────
+    remote_p = subparsers.add_parser("remote", help="Pull a capture from a remote device over SSH/SCP")
+    remote_p.add_argument("--host", default=None, help="Remote host in user@host form")
+    remote_p.add_argument("--path", default=None, help="Remote file path or directory")
+    remote_p.add_argument("--port", default=None, type=int, help="SSH port (default: 22)")
+    remote_p.add_argument("--identity", default=None, help="SSH identity file (optional)")
+    remote_p.add_argument("--dest", default=None, help="Local destination directory")
+    remote_p.add_argument("--no-latest", action="store_true", help="Do not resolve latest file for directory/pattern paths")
+    remote_p.add_argument("--watch", action="store_true", help="Keep pulling on an interval")
+    remote_p.add_argument("--interval", default=None, type=int, help="Watch interval in seconds")
+    remote_p.add_argument("--run", default="none", choices=["none", "extract", "detect", "analyze", "play", "all"], help="Run stages after pull")
 
     # ── Full Wi-Fi pipeline ──────────────────────────────────────────────────
     wifi_p = subparsers.add_parser(
@@ -659,6 +693,33 @@ def main(argv: Optional[list] = None) -> int:
         decrypted_dir = getattr(args, "decrypted", None)
         run_all_wifi(config, decrypted_dir=decrypted_dir, method=method)
         return 0
+
+    if args.command == "remote":
+        latest_only = not bool(getattr(args, "no_latest", False))
+        if getattr(args, "watch", False):
+            watch_remote_capture(
+                config,
+                host=getattr(args, "host", None),
+                path=getattr(args, "path", None),
+                port=getattr(args, "port", None),
+                identity=getattr(args, "identity", None),
+                dest_dir=getattr(args, "dest", None),
+                interval=getattr(args, "interval", None),
+                latest_only=latest_only,
+            )
+            return 0
+        pulled = pull_remote_capture(
+            config,
+            host=getattr(args, "host", None),
+            path=getattr(args, "path", None),
+            port=getattr(args, "port", None),
+            identity=getattr(args, "identity", None),
+            dest_dir=getattr(args, "dest", None),
+            latest_only=latest_only,
+        )
+        if pulled and getattr(args, "run", "none") != "none":
+            _run_after_pull(config, str(pulled), str(getattr(args, "run", "none")))
+        return 0 if pulled else 1
 
     if args.command == "extract":
         run_extract(config, getattr(args, "pcap", None))

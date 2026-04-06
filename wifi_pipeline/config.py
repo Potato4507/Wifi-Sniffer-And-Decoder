@@ -33,6 +33,13 @@ DEFAULT_CONFIG = {
     "deauth_count": 10,
     "hashcat_rules": "",
     "monitor_method": "airodump",   # airodump | besside | tcpdump
+    # ── remote capture (optional) ──────────────────────────────────────────
+    "remote_host": "",
+    "remote_path": "",
+    "remote_port": 22,
+    "remote_identity": "",
+    "remote_dest_dir": "./pipeline_output/remote_imports",
+    "remote_poll_interval": 8,
     # ── extraction ────────────────────────────────────────────────────────────
     "video_port": 5004,
     "protocol": "udp",
@@ -224,6 +231,33 @@ def interactive_config(config: Dict[str, object]) -> Dict[str, object]:
         ok(f"Using WPA password from environment variable {env_name}.")
     elif confirm("Provide a session-only WPA password now? (will NOT be saved to disk)", default=False):
         config["wpa_password"] = ask("WPA password", secret=True)
+
+    section("Remote Capture (optional)")
+    if confirm("Configure a remote capture source (SSH/SCP)?", default=False):
+        config["remote_host"] = ask(
+            "Remote host (user@host)",
+            str(config.get("remote_host") or ""),
+        )
+        config["remote_path"] = ask(
+            "Remote capture path (file or directory)",
+            str(config.get("remote_path") or ""),
+        )
+        config["remote_port"] = ask_int(
+            "Remote SSH port",
+            int(config.get("remote_port", 22)),
+        )
+        config["remote_identity"] = ask(
+            "SSH identity file (optional)",
+            str(config.get("remote_identity") or ""),
+        )
+        config["remote_dest_dir"] = ask(
+            "Local import directory",
+            str(config.get("remote_dest_dir") or "./pipeline_output/remote_imports"),
+        )
+        config["remote_poll_interval"] = ask_int(
+            "Remote poll interval in seconds",
+            int(config.get("remote_poll_interval", 8)),
+        )
 
     if confirm("Save config to lab.json?", default=True):
         save_config(config)
