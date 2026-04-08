@@ -1,4 +1,5 @@
 .venv/
+.venv*/
 __pycache__/
 *.py[cod]
 pipeline_output/
@@ -9,3 +10,4 @@ dist/
 *.egg-info/
 htmlcov/
 .coverage
+.playwright-cli/

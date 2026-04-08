@@ -16,12 +16,13 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+          cache: pip
 
       - name: Install dependencies
         run: |
@@ -32,7 +33,15 @@ jobs:
         run: python -m compileall -q wifi_pipeline
 
       - name: Run tests
-        run: python -m pytest -q
+        run: python -m pytest -q -ra --junitxml=pytest-results.xml
+
+      - name: Upload pytest report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pytest-report-release
+          path: pytest-results.xml
+          if-no-files-found: ignore
 
       - name: Build wheel and source distribution
         run: python -m build
@@ -50,7 +59,7 @@ jobs:
           python scripts/release_gate.py "${SAMPLE_ARGS[@]}" --write-summary dist/release-gate.json
 
       - name: Upload workflow artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-artifacts
           path: dist/*

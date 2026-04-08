@@ -139,6 +139,7 @@ For the full release checklist, see [`RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.m
 ## More docs
 
 - [`GETTING_STARTED.md`](GETTING_STARTED.md): setup and daily-use guide
+- [`ECOSYSTEM_MAP.md`](ECOSYSTEM_MAP.md): shortlist of external projects worth adapting, keeping external, or avoiding for this repo
 - [`RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.md): release criteria and validation expectations
 - [`validation_matrix/README.md`](validation_matrix/README.md): required real-hardware reports
 - [`CHANGELOG.md`](CHANGELOG.md): release history
