@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import csv
 import hashlib
+import io
 import json
 import shutil
 from dataclasses import dataclass, field
@@ -3155,6 +3157,13 @@ class PlatformApp:
         timeline_view_path = present_dir / "timeline_view.json"
         dataset_export_path = present_dir / "dataset_export.json"
         dashboard_view_path = present_dir / "dashboard_view.json"
+        analyst_report_path = present_dir / "analyst_report.md"
+        sources_csv_path = present_dir / "sources.csv"
+        records_csv_path = present_dir / "records.csv"
+        relationships_csv_path = present_dir / "relationships.csv"
+        jobs_csv_path = present_dir / "jobs.csv"
+        audit_events_csv_path = present_dir / "audit_events.csv"
+        watched_sources_csv_path = present_dir / "watched_sources.csv"
         presentation_report_path = present_dir / "presentation_report.json"
 
         case_summary_path.write_text(json.dumps(case_summary, indent=2), encoding="utf-8")
@@ -3162,6 +3171,57 @@ class PlatformApp:
         timeline_view_path.write_text(json.dumps({"timelines": timelines}, indent=2), encoding="utf-8")
         dataset_export_path.write_text(json.dumps(dataset_export, indent=2), encoding="utf-8")
         dashboard_view_path.write_text(json.dumps(dashboard_view, indent=2), encoding="utf-8")
+        analyst_report_path.write_text(
+            _build_analyst_report_markdown(
+                case_summary=case_summary,
+                source=source,
+                database_path=database_file,
+                plugin_summary=plugin_summary,
+            ),
+            encoding="utf-8",
+        )
+        sources_csv_path.write_text(
+            _rows_to_csv_text(
+                list(dataset_export.get("sources") or []),
+                preferred_fields=("id", "case_id", "source_type", "display_name", "locator", "collector", "media_type", "content_hash"),
+            ),
+            encoding="utf-8",
+        )
+        records_csv_path.write_text(
+            _rows_to_csv_text(
+                list(dataset_export.get("records") or []),
+                preferred_fields=("id", "record_type", "case_id", "source_id", "created_at", "observed_at", "tags", "attributes"),
+            ),
+            encoding="utf-8",
+        )
+        relationships_csv_path.write_text(
+            _rows_to_csv_text(
+                list(dataset_export.get("relationships") or []),
+                preferred_fields=("id", "relationship_type", "case_id", "source_id", "source_ref", "target_ref", "reason"),
+            ),
+            encoding="utf-8",
+        )
+        jobs_csv_path.write_text(
+            _rows_to_csv_text(
+                list(dataset_export.get("jobs") or []),
+                preferred_fields=("id", "stage", "status", "case_id", "source_id", "worker", "started_at", "finished_at"),
+            ),
+            encoding="utf-8",
+        )
+        audit_events_csv_path.write_text(
+            _rows_to_csv_text(
+                list(dataset_export.get("audit_events") or []),
+                preferred_fields=("audit_id", "stage", "status", "case_id", "source_id", "plugin", "job_id", "created_at"),
+            ),
+            encoding="utf-8",
+        )
+        watched_sources_csv_path.write_text(
+            _rows_to_csv_text(
+                list(dataset_export.get("watched_sources") or []),
+                preferred_fields=("watch_id", "case_id", "source_type", "display_name", "locator", "status", "enabled", "poll_interval_seconds"),
+            ),
+            encoding="utf-8",
+        )
 
         presentation_report = {
             "schema_version": 1,
@@ -3178,6 +3238,13 @@ class PlatformApp:
                 "timeline_view": str(timeline_view_path),
                 "dataset_export": str(dataset_export_path),
                 "dashboard_view": str(dashboard_view_path),
+                "analyst_report_markdown": str(analyst_report_path),
+                "sources_csv": str(sources_csv_path),
+                "records_csv": str(records_csv_path),
+                "relationships_csv": str(relationships_csv_path),
+                "jobs_csv": str(jobs_csv_path),
+                "audit_events_csv": str(audit_events_csv_path),
+                "watched_sources_csv": str(watched_sources_csv_path),
             },
             "api_examples": {
                 "health": "/health",
@@ -3198,6 +3265,7 @@ class PlatformApp:
                 "source_count": case_summary.get("source_count", 0),
                 "plugin_count": plugin_summary.get("plugin_count", 0),
                 "ready_plugin_count": plugin_summary.get("ready_count", 0),
+                "presentation_artifact_count": 12,
             },
         }
         presentation_report_path.write_text(json.dumps(presentation_report, indent=2), encoding="utf-8")
@@ -3219,6 +3287,13 @@ class PlatformApp:
                 str(timeline_view_path),
                 str(dataset_export_path),
                 str(dashboard_view_path),
+                str(analyst_report_path),
+                str(sources_csv_path),
+                str(records_csv_path),
+                str(relationships_csv_path),
+                str(jobs_csv_path),
+                str(audit_events_csv_path),
+                str(watched_sources_csv_path),
             ),
             details={"database_path": str(database_file)},
         )
@@ -3233,6 +3308,13 @@ class PlatformApp:
                 str(timeline_view_path),
                 str(dataset_export_path),
                 str(dashboard_view_path),
+                str(analyst_report_path),
+                str(sources_csv_path),
+                str(records_csv_path),
+                str(relationships_csv_path),
+                str(jobs_csv_path),
+                str(audit_events_csv_path),
+                str(watched_sources_csv_path),
                 str(audit_path),
             ),
             metrics={
@@ -3266,6 +3348,136 @@ def _merge_stage_results(*results: PluginResult) -> PluginResult:
         errors=tuple(errors),
         metrics=metrics,
     )
+
+
+def _csv_value(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (dict, list, tuple, set)):
+        return json.dumps(value, sort_keys=True, ensure_ascii=True)
+    return str(value)
+
+
+def _rows_to_csv_text(rows: list[dict[str, object]], *, preferred_fields: tuple[str, ...] = ()) -> str:
+    normalized_rows = [dict(row or {}) for row in rows]
+    fieldnames: list[str] = []
+    for name in preferred_fields:
+        if name not in fieldnames:
+            fieldnames.append(name)
+    for row in normalized_rows:
+        for key in row.keys():
+            normalized_key = str(key or "").strip()
+            if normalized_key and normalized_key not in fieldnames:
+                fieldnames.append(normalized_key)
+
+    buffer = io.StringIO()
+    if not fieldnames:
+        return buffer.getvalue()
+
+    writer = csv.DictWriter(buffer, fieldnames=fieldnames, lineterminator="\n")
+    writer.writeheader()
+    for row in normalized_rows:
+        writer.writerow({name: _csv_value(row.get(name)) for name in fieldnames})
+    return buffer.getvalue()
+
+
+def _build_analyst_report_markdown(
+    *,
+    case_summary: dict[str, object],
+    source: SourceRecord,
+    database_path: Path,
+    plugin_summary: dict[str, object],
+) -> str:
+    lines = [
+        "# Analyst Report",
+        "",
+        f"- Generated: {utc_now()}",
+        f"- Case: {str(case_summary.get('case_id') or source.case_id or source.source_id)}",
+        f"- Source: {source.display_name or source.locator or source.source_id}",
+        f"- Database: {database_path}",
+        "",
+        "## Summary",
+        "",
+        f"- Sources: {int(case_summary.get('source_count') or 0)}",
+        f"- Records: {int(case_summary.get('record_count') or 0)}",
+        f"- Relationships: {int(case_summary.get('relationship_edge_count') or 0)}",
+        f"- Timelines: {int(case_summary.get('timeline_count') or 0)}",
+        f"- Jobs: {int(case_summary.get('job_count') or 0)}",
+        f"- Audit events: {int(case_summary.get('audit_event_count') or 0)}",
+        "",
+        "## Platform Readiness",
+        "",
+        f"- Plugins: {int(plugin_summary.get('plugin_count') or 0)} total",
+        f"- Ready plugins: {int(plugin_summary.get('ready_count') or 0)}",
+        f"- Optional tools missing: {int(plugin_summary.get('optional_tool_missing_count') or 0)}",
+        "",
+    ]
+    lines.extend(_markdown_named_rows("Top Indicators", list(case_summary.get("top_indicators") or [])))
+    lines.extend(_markdown_named_rows("Top Identities", list(case_summary.get("top_identities") or [])))
+    lines.extend(_markdown_key_counts("Relationship Types", dict(case_summary.get("relationship_type_counts") or {})))
+    lines.extend(_markdown_event_rows("Recent Events", list(case_summary.get("recent_events") or [])))
+    lines.extend(_markdown_job_rows("Recent Jobs", list(case_summary.get("recent_jobs") or [])))
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _markdown_named_rows(title: str, rows: list[dict[str, object]]) -> list[str]:
+    lines = ["## " + title, ""]
+    if not rows:
+        lines.append("- None")
+        lines.append("")
+        return lines
+    for row in rows[:10]:
+        name = str(row.get("value") or row.get("name") or row.get("id") or "unknown")
+        count = int(row.get("count") or 0)
+        row_type = str(row.get("indicator_type") or row.get("identity_type") or row.get("type") or "").strip()
+        suffix = f" ({row_type})" if row_type else ""
+        lines.append(f"- {name}{suffix}: {count}")
+    lines.append("")
+    return lines
+
+
+def _markdown_key_counts(title: str, counts: dict[str, object]) -> list[str]:
+    lines = ["## " + title, ""]
+    if not counts:
+        lines.append("- None")
+        lines.append("")
+        return lines
+    for key, value in sorted(counts.items(), key=lambda item: (-int(item[1] or 0), str(item[0]))):
+        lines.append(f"- {key}: {int(value or 0)}")
+    lines.append("")
+    return lines
+
+
+def _markdown_event_rows(title: str, rows: list[dict[str, object]]) -> list[str]:
+    lines = ["## " + title, ""]
+    if not rows:
+        lines.append("- None")
+        lines.append("")
+        return lines
+    for row in rows[:10]:
+        timestamp = str(row.get("timestamp") or row.get("created_at") or "").strip()
+        label = str(row.get("title") or row.get("event_type") or row.get("id") or "event")
+        lines.append(f"- {timestamp or 'unknown time'}: {label}")
+    lines.append("")
+    return lines
+
+
+def _markdown_job_rows(title: str, rows: list[dict[str, object]]) -> list[str]:
+    lines = ["## " + title, ""]
+    if not rows:
+        lines.append("- None")
+        lines.append("")
+        return lines
+    for row in rows[:10]:
+        stage = str(row.get("stage") or "job")
+        status = str(row.get("status") or "unknown")
+        worker = str(row.get("worker") or "").strip()
+        worker_suffix = f" via {worker}" if worker else ""
+        lines.append(f"- {stage}: {status}{worker_suffix}")
+    lines.append("")
+    return lines
 
 
 def _append_stage_audit(

@@ -490,6 +490,14 @@ def test_platform_app_materializes_presentation_views_from_store(tmp_path) -> No
     assert any(path.endswith("case_summary.json") for path in present_result.artifact_paths)
     assert any(path.endswith("graph_view.json") for path in present_result.artifact_paths)
     assert any(path.endswith("dataset_export.json") for path in present_result.artifact_paths)
+    analyst_report_path = next(path for path in present_result.artifact_paths if path.endswith("analyst_report.md"))
+    records_csv_path = next(path for path in present_result.artifact_paths if path.endswith("records.csv"))
+    analyst_report_text = Path(analyst_report_path).read_text(encoding="utf-8")
+    records_csv_text = Path(records_csv_path).read_text(encoding="utf-8")
+    assert "# Analyst Report" in analyst_report_text
+    assert "## Summary" in analyst_report_text
+    assert "case-100" in analyst_report_text
+    assert records_csv_text.startswith("id,record_type,case_id,source_id")
 
 
 def test_platform_app_run_pipeline_is_rerun_safe_and_persists_audit_history(tmp_path) -> None:

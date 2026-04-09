@@ -158,6 +158,13 @@ The later stages follow the same pattern with the generated report paths.
 - `timeline_view.json`
 - `dataset_export.json`
 - `dashboard_view.json`
+- `analyst_report.md`
+- `sources.csv`
+- `records.csv`
+- `relationships.csv`
+- `jobs.csv`
+- `audit_events.csv`
+- `watched_sources.csv`
 
 ## Local API
 
@@ -234,7 +241,7 @@ Registered watched sources are stored in the same SQLite database and are checke
 - Use explicit `case_id` values whenever possible so datasets group cleanly.
 - The platform preserves provenance on every stage output; if a record cannot be traced back, treat that as a bug.
 - The Wi-Fi plugin remains a compatibility bridge. It can feed the same shared store and presentation layers as file and log inputs.
-- `present` materializes analyst-friendly JSON views; `serve` exposes the same stored data through a local read-only API.
+- `present` materializes analyst-friendly JSON, Markdown, and CSV views; `serve` exposes the same stored data through a local read-only API.
 - `python -m intel_api.cli plugins --json` shows the same plugin readiness snapshot used by `/plugins`, `/health`, and the dashboard.
 - `python -m intel_api.cli run-queued --json` processes active queue files in stage order and archives them under `queues/completed` or `queues/failed`.
 - Queue execution is now triage-aware within each stage, so higher-signal sources like network captures, system artifacts, logs, and append-only deltas are processed before lower-priority backlog when `--max-jobs` limits the cycle budget.
