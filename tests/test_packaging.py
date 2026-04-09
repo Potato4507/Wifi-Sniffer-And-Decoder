@@ -64,6 +64,14 @@ def test_dev_installation_uses_pyproject_extras() -> None:
     assert 'python -m pip install ".[dev]"' in release_workflow
 
 
+def test_gitignore_covers_local_tooling_artifacts() -> None:
+    gitignore = Path(".gitignore").read_text(encoding="utf-8")
+
+    assert ".venv/" in gitignore
+    assert ".venv*/" in gitignore
+    assert ".playwright-cli/" in gitignore
+
+
 def test_build_release_script_creates_portable_zip(tmp_path) -> None:
     build_release = _load_build_release_module()
 
