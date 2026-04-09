@@ -245,6 +245,52 @@ def test_monitor_runtime_run_once_processes_queue_and_writes_status(tmp_path) ->
     assert watcher_rows[0]["total_check_count"] == 1
 
 
+def test_monitor_runtime_resume_continues_cycle_counts_and_drains_backlog(tmp_path) -> None:
+    sample = tmp_path / "monitor_resume_queue.txt"
+    sample.write_text("email=resume@example.com https://example.com/resume", encoding="utf-8")
+
+    app = PlatformApp()
+    app.ingest(
+        IngestRequest(source_type="file", locator=str(sample)),
+        case_id="monitor-resume-case",
+        output_root=str(tmp_path / "out"),
+        workspace_root=str(tmp_path),
+    )
+
+    first_runtime = MonitorRuntime(
+        app=app,
+        output_root=tmp_path / "out",
+        workspace_root=tmp_path,
+        case_id="monitor-resume-case",
+        max_jobs=1,
+    )
+    first = first_runtime.run_once()
+
+    second_runtime = MonitorRuntime(
+        app=app,
+        output_root=tmp_path / "out",
+        workspace_root=tmp_path,
+        case_id="monitor-resume-case",
+        max_jobs=1,
+    )
+    second = second_runtime.run_once()
+
+    history_rows = second_runtime.read_history(limit=10)
+
+    assert first["cycle_count"] == 1
+    assert first["last_result"]["processed_job_count"] == 1
+    assert first["queue_total_after"] >= 1
+    assert second["cycle_count"] == 2
+    assert second["last_result"]["processed_job_count"] == 1
+    assert second["total_processed_job_count"] == (
+        int(first["total_processed_job_count"]) + int(second["last_result"]["processed_job_count"])
+    )
+    assert len(history_rows) == 2
+    assert history_rows[0]["cycle_count"] == 1
+    assert history_rows[1]["cycle_count"] == 2
+    assert history_rows[1]["processed_job_count"] == 1
+
+
 def test_monitor_runtime_appends_cycle_history(tmp_path) -> None:
     sample = tmp_path / "monitor_history_sample.txt"
     sample.write_text("email=test@example.com https://example.com/path", encoding="utf-8")
@@ -276,6 +322,93 @@ def test_monitor_runtime_appends_cycle_history(tmp_path) -> None:
     assert history_rows[1]["cycle_count"] == 2
     assert history_rows[0]["case_id"] == "monitor-history-case"
     assert history_rows[1]["queue_total_after"] == 0
+
+
+def test_monitor_runtime_resume_preserves_watched_source_counters(tmp_path) -> None:
+    sample = tmp_path / "monitor_resume_watch.log"
+    sample.write_text("line1\n", encoding="utf-8")
+
+    app = PlatformApp()
+    register_payload = app.register_watch_source(
+        IngestRequest(source_type="log", locator=str(sample)),
+        case_id="monitor-resume-watch",
+        output_root=str(tmp_path / "out"),
+        workspace_root=str(tmp_path),
+        poll_interval_seconds=0.0,
+    )
+
+    first_runtime = MonitorRuntime(
+        app=app,
+        output_root=tmp_path / "out",
+        workspace_root=tmp_path,
+        case_id="monitor-resume-watch",
+    )
+    first = first_runtime.run_once()
+    sample.write_text("line1\nline2\n", encoding="utf-8")
+
+    second_runtime = MonitorRuntime(
+        app=app,
+        output_root=tmp_path / "out",
+        workspace_root=tmp_path,
+        case_id="monitor-resume-watch",
+    )
+    second = second_runtime.run_once()
+    result = next(item for item in second["source_checks"]["results"] if item["watch_id"] == register_payload["watch_id"])
+    persisted_watcher = next(
+        item
+        for item in second["watchers"]
+        if item["watcher_type"] == "source_monitor" and str(item.get("locator") or "") == str(sample.resolve())
+    )
+
+    assert first["cycle_count"] == 1
+    assert second["cycle_count"] == 2
+    assert result["executed"] is True
+    assert result["changed"] is True
+    assert persisted_watcher["total_check_count"] >= 2
+    assert persisted_watcher["total_change_count"] >= 2
+    assert second["total_source_check_count"] >= int(first["total_source_check_count"]) + 1
+    assert second["total_source_change_count"] >= int(first["total_source_change_count"]) + 1
+
+
+def test_monitor_runtime_run_forever_accumulates_history_and_idle_cycles(tmp_path) -> None:
+    sample = tmp_path / "monitor_soak.log"
+    sample.write_text("line1\n", encoding="utf-8")
+
+    app = PlatformApp()
+    app.register_watch_source(
+        IngestRequest(source_type="log", locator=str(sample)),
+        case_id="monitor-soak-case",
+        output_root=str(tmp_path / "out"),
+        workspace_root=str(tmp_path),
+        poll_interval_seconds=0.0,
+    )
+    seed = tmp_path / "monitor_soak_seed.txt"
+    seed.write_text("email=soak@example.com https://example.com/soak", encoding="utf-8")
+    app.ingest(
+        IngestRequest(source_type="file", locator=str(seed)),
+        case_id="monitor-soak-case",
+        output_root=str(tmp_path / "out"),
+        workspace_root=str(tmp_path),
+    )
+
+    runtime = MonitorRuntime(
+        app=app,
+        output_root=tmp_path / "out",
+        workspace_root=tmp_path,
+        case_id="monitor-soak-case",
+        poll_interval=0.0,
+    )
+    payload = runtime.run_forever(iterations=4)
+    history_rows = runtime.read_history(limit=10)
+
+    assert payload["cycle_count"] == 4
+    assert len(history_rows) == 4
+    assert history_rows[-1]["cycle_count"] == 4
+    assert payload["total_processed_job_count"] >= 6
+    assert payload["idle_cycle_count"] >= 1
+    assert payload["total_source_check_count"] >= 4
+    assert Path(payload["status_path"]).exists()
+    assert Path(payload["history_path"]).exists()
 
 
 def test_monitor_runtime_forecast_flags_queue_pressure_spike(tmp_path) -> None:

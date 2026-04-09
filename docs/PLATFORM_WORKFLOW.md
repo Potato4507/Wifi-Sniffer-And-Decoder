@@ -252,6 +252,7 @@ Registered watched sources are stored in the same SQLite database and are checke
 - `python -m intel_api.cli monitor` is the first monitor-mode runtime step: it is passive, queue-driven, and designed to keep watching and draining queued work without adding active probing.
 - `python -m intel_api.cli monitor-once` is useful for schedulers, services, and tests that want a single heartbeat cycle.
 - `python -m intel_api.cli monitor-status` reads the persisted monitor snapshot so you can inspect queue health without opening the filesystem directly.
+- Monitor state is restart-safe: queued backlog, monitor history, status snapshots, and watched-source counters resume from disk when the runtime starts again.
 - `python -m intel_api.cli cleanup` gives you an explicit retention control for long-running workspaces: it prunes old `queues/completed`, `queues/failed`, and `objects/derived/watch_delta` content while leaving active queues and raw evidence alone.
 - The read-only API now exposes monitor state at `/monitor` and `/cases/<case-id>/monitor`, and the browser UI exposes the same scheduler view at `/monitor-view` and `/cases/<case-id>/monitor-view`.
 - Monitor cycle history is now exposed at `/monitor-history` and `/cases/<case-id>/monitor-history`, which gives you compact per-cycle queue and throughput snapshots instead of only the latest status file.
