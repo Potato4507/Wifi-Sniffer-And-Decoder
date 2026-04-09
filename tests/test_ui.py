@@ -1,19 +1,8 @@
 from __future__ import annotations
 
-from typing import Iterable
-
 import pytest
 
 from wifi_pipeline import ui
-
-
-def _iter_inputs(values: Iterable[str]):
-    iterator = iter(values)
-
-    def _reader(_prompt: str) -> str:
-        return next(iterator)
-
-    return _reader
 
 
 def test_banner_prints_product_heading(capsys) -> None:
