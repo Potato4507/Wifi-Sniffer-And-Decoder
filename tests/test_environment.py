@@ -85,6 +85,8 @@ def test_workflow_support_matrix_for_windows_remote(monkeypatch) -> None:
     monkeypatch.setattr(environment, "IS_LINUX", False)
     monkeypatch.setattr(environment, "IS_MACOS", False)
     monkeypatch.setattr(environment, "_find_windows_wlanhelper", lambda: r"C:\Npcap\WlanHelper.exe")
+    monkeypatch.setattr(environment, "_find_windows_npcap", lambda: r"C:\Npcap")
+    monkeypatch.setattr(environment, "is_admin", lambda: False)
 
     tool_map = {
         "dumpcap": r"C:\Wireshark\dumpcap.exe",
