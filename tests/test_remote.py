@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+import shlex
 import subprocess
 from pathlib import Path
 
 from wifi_pipeline import __version__
 from wifi_pipeline.remote import (
     REMOTE_AGENT_PROTOCOL,
+    RemoteSource,
     _bootstrap_remote_script,
     _bootstrap_validation_errors,
     _appliance_profile_script,
@@ -20,6 +22,7 @@ from wifi_pipeline.remote import (
     _privileged_capture_runner_script,
     _resolve_remote_install_mode,
     _resolve_remote_install_profile,
+    _run_remote,
     bootstrap_remote_host,
     discover_remote_appliances,
     doctor_remote_host,
@@ -27,6 +30,14 @@ from wifi_pipeline.remote import (
     remote_service_host,
     start_remote_capture,
 )
+
+
+def _ssh_remote_command(*args: str) -> str:
+    return shlex.join(list(args))
+
+
+def _is_ssh_remote_command(cmd: list[str], *args: str) -> bool:
+    return bool(cmd) and cmd[0] == "ssh" and cmd[-1] == _ssh_remote_command(*args)
 
 
 def test_is_pattern() -> None:
@@ -43,6 +54,31 @@ def test_latest_patterns() -> None:
     assert _latest_patterns("/tmp/") == ["/tmp/*.pcap*", "/tmp/*.cap*"]
     assert _latest_patterns("/tmp/*.pcap") == ["/tmp/*.pcap"]
     assert _latest_patterns("/tmp/file.pcapng") == []
+
+
+def test_run_remote_joins_shell_command_before_invoking_ssh(monkeypatch, tmp_path) -> None:
+    seen: list[list[str]] = []
+
+    def fake_run(cmd, capture_output=True, text=True, input=None, check=False, **_kwargs):
+        seen.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="/home/pi", stderr="")
+
+    monkeypatch.setattr("wifi_pipeline.remote.subprocess.run", fake_run)
+
+    _run_remote(
+        RemoteSource(
+            host="pi@raspberrypi",
+            path="/tmp/test.pcap",
+            port=22,
+            identity="",
+            dest_dir=tmp_path,
+            poll_interval=8,
+        ),
+        ["--", "sh", "-c", 'printf "%s" "$HOME"'],
+    )
+
+    assert seen
+    assert seen[0][-1] == _ssh_remote_command("sh", "-c", 'printf "%s" "$HOME"')
 
 
 def test_pull_remote_capture_missing_tools(monkeypatch) -> None:
@@ -110,7 +146,7 @@ def test_pull_remote_capture_retries_transient_scp_failure(monkeypatch, tmp_path
         return None
 
     def fake_run(cmd, capture_output=None, text=None, check=False, **_kwargs):
-        if cmd[0] == "ssh" and cmd[-3:] == ["sh", "-lc", 'printf "%s" "$HOME"']:
+        if _is_ssh_remote_command(cmd, "sh", "-c", 'printf "%s" "$HOME"'):
             return subprocess.CompletedProcess(cmd, 0, stdout="/home/pi", stderr="")
         if cmd[0] == "ssh":
             return subprocess.CompletedProcess(
@@ -249,7 +285,7 @@ def test_pull_remote_capture_retries_transient_rsync_failure(monkeypatch, tmp_pa
         return None
 
     def fake_run(cmd, capture_output=None, text=None, check=False, **_kwargs):
-        if cmd[0] == "ssh" and cmd[-3:] == ["sh", "-lc", 'printf "%s" "$HOME"']:
+        if _is_ssh_remote_command(cmd, "sh", "-c", 'printf "%s" "$HOME"'):
             return subprocess.CompletedProcess(cmd, 0, stdout="/home/pi", stderr="")
         if cmd[0] == "ssh":
             return subprocess.CompletedProcess(
@@ -354,7 +390,7 @@ def test_pair_remote_host_installs_and_verifies_key(monkeypatch, tmp_path) -> No
 
     def fake_run(cmd, capture_output=None, text=None, check=False, **_kwargs):
         commands.append(cmd)
-        if cmd[-2:] == ["--", "printf", "paired"]:
+        if _is_ssh_remote_command(cmd, "printf", "paired"):
             return subprocess.CompletedProcess(cmd, 0, stdout="paired", stderr="")
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
@@ -380,7 +416,8 @@ def test_bootstrap_remote_script_contains_capture_helper() -> None:
     assert "checksum_file" in script
     assert "/etc/sudoers.d/wifi-pipeline-capture" in script
     assert "CAPTURE_DIR=/home/pi/wifi-pipeline/captures" in script
-    assert "apt-get install -y tcpdump" in script
+    assert 'PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"' in script
+    assert "apt-get install -y tcpdump iw" in script
 
 
 def test_privileged_runner_script_hardens_output_path() -> None:
@@ -398,6 +435,10 @@ def test_capture_agent_script_exposes_service_and_doctor_commands() -> None:
 
     assert "#!/usr/bin/env bash" in script
     assert 'PROTOCOL="capture-agent/v1"' in script
+    assert 'HOME="${HOME:-$(getent passwd "$(id -un)" 2>/dev/null | cut -d: -f6)}"' in script
+    assert 'PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"' in script
+    assert "sed ':a;N;$!ba" not in script
+    assert "value=\"${value//$'\\n'/\\\\n}\"" in script
     assert 'run_service()' in script
     assert 'run_doctor()' in script
     assert 'run_artifact_info()' in script
@@ -406,6 +447,8 @@ def test_capture_agent_script_exposes_service_and_doctor_commands() -> None:
 def test_capture_service_script_tracks_lifecycle_recovery_state() -> None:
     script = _bootstrap_remote_script("/home/pi/wifi-pipeline", "/home/pi/wifi-pipeline/captures")
 
+    assert 'HOME="${HOME:-$(getent passwd "$(id -un)" 2>/dev/null | cut -d: -f6)}"' in script
+    assert 'PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${PATH:-}"' in script
     assert 'current_boot_id()' in script
     assert 'finalize_lifecycle_state()' in script
     assert 'stale_pid_cleaned=yes' in script
@@ -497,6 +540,12 @@ def test_appliance_profile_script_installs_health_endpoint() -> None:
     assert "wifi-pipeline-appliance.service" in script
     assert "HEALTH_PORT=9001" in script
     assert "ListenStream=$HEALTH_PORT" in script
+    assert "Accept=yes" in script
+    assert "wifi-pipeline-health@.service" in script
+    assert "Service=$HEALTH_SERVICE_NAME" not in script
+    assert "ExecStart=$HEALTH_SCRIPT" in script
+    assert "ExecStart=/bin/sh -c 'mkdir -p /home/pi/wifi-pipeline/captures /home/pi/wifi-pipeline/state && /home/pi/wifi-pipeline/bin/wifi-pipeline-agent doctor >/dev/null'" in script
+    assert 'systemctl reset-failed "$APPLIANCE_SERVICE_NAME" "$HEALTH_SERVICE_NAME" "$HEALTH_SOCKET_NAME"' in script
 
 
 def test_bootstrap_remote_host_prepares_remote_helper(monkeypatch) -> None:
@@ -505,7 +554,7 @@ def test_bootstrap_remote_host_prepares_remote_helper(monkeypatch) -> None:
     def fake_run(cmd, capture_output=True, text=True, input=None, check=False, **_kwargs):
         if input:
             seen_inputs.append(input)
-        if cmd[-3:] == ["sh", "-lc", 'printf "%s" "$HOME"']:
+        if _is_ssh_remote_command(cmd, "sh", "-c", 'printf "%s" "$HOME"'):
             return subprocess.CompletedProcess(cmd, 0, stdout="/home/pi", stderr="")
         return subprocess.CompletedProcess(
             cmd,
@@ -584,8 +633,9 @@ def test_bootstrap_remote_host_prepares_remote_helper(monkeypatch) -> None:
     assert result["privilege_mode"] == "sudoers_runner"
     assert result["privileged_runner"] == "/usr/local/bin/wifi-pipeline-capture-privileged"
     assert seen_inputs
-    assert "wifi-pipeline-capture" in seen_inputs[0]
-    assert "wifi-pipeline-agent" in seen_inputs[0]
+    first_input = seen_inputs[0].decode("utf-8") if isinstance(seen_inputs[0], bytes) else seen_inputs[0]
+    assert "wifi-pipeline-capture" in first_input
+    assert "wifi-pipeline-agent" in first_input
 
 
 def test_bootstrap_remote_host_bundle_mode_uploads_bundle(monkeypatch, tmp_path) -> None:
@@ -600,7 +650,7 @@ def test_bootstrap_remote_host_bundle_mode_uploads_bundle(monkeypatch, tmp_path)
         if cmd[0] == "scp":
             uploaded.append(cmd)
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
-        if cmd[0] == "ssh" and cmd[-3:] == ["sh", "-lc", 'printf "%s" "$HOME"']:
+        if _is_ssh_remote_command(cmd, "sh", "-c", 'printf "%s" "$HOME"'):
             return subprocess.CompletedProcess(cmd, 0, stdout="/home/pi", stderr="")
         if cmd[0] == "ssh" and "tar -xzf" in cmd[-1]:
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
@@ -681,7 +731,7 @@ def test_bootstrap_remote_host_bundle_mode_uploads_bundle(monkeypatch, tmp_path)
 
 def test_bootstrap_remote_host_rejects_failed_validation(monkeypatch) -> None:
     def fake_run(cmd, capture_output=True, text=True, input=None, check=False, **_kwargs):
-        if cmd[-3:] == ["sh", "-lc", 'printf "%s" "$HOME"']:
+        if _is_ssh_remote_command(cmd, "sh", "-c", 'printf "%s" "$HOME"'):
             return subprocess.CompletedProcess(cmd, 0, stdout="/home/pi", stderr="")
         return subprocess.CompletedProcess(
             cmd,
@@ -831,7 +881,7 @@ def test_start_remote_capture_runs_helper_and_pulls_file(monkeypatch, tmp_path) 
 
     def fake_run(cmd, capture_output=True, text=True, input=None, check=False, **_kwargs):
         commands.append(cmd)
-        if cmd[0] == "ssh" and cmd[-3:] == ["sh", "-lc", 'printf "%s" "$HOME"']:
+        if _is_ssh_remote_command(cmd, "sh", "-c", 'printf "%s" "$HOME"'):
             return subprocess.CompletedProcess(cmd, 0, stdout="/home/pi", stderr="")
         if cmd[0] == "ssh":
             remote_cmd = cmd[-1]
@@ -901,7 +951,7 @@ def test_start_remote_capture_reports_privilege_gap(monkeypatch) -> None:
     )
 
     def fake_run(cmd, capture_output=True, text=True, input=None, check=False, **_kwargs):
-        if cmd[0] == "ssh" and cmd[-3:] == ["sh", "-lc", 'printf "%s" "$HOME"']:
+        if _is_ssh_remote_command(cmd, "sh", "-c", 'printf "%s" "$HOME"'):
             return subprocess.CompletedProcess(cmd, 0, stdout="/home/pi", stderr="")
         if cmd[0] == "ssh":
             return next(statuses)
@@ -934,7 +984,7 @@ def test_start_remote_capture_reports_reboot_interruption(monkeypatch) -> None:
     )
 
     def fake_run(cmd, capture_output=True, text=True, input=None, check=False, **_kwargs):
-        if cmd[0] == "ssh" and cmd[-3:] == ["sh", "-lc", 'printf "%s" "$HOME"']:
+        if _is_ssh_remote_command(cmd, "sh", "-c", 'printf "%s" "$HOME"'):
             return subprocess.CompletedProcess(cmd, 0, stdout="/home/pi", stderr="")
         if cmd[0] == "ssh":
             return next(statuses)
@@ -967,7 +1017,7 @@ def test_start_remote_capture_reports_stale_pid_recovery_interruption(monkeypatc
     )
 
     def fake_run(cmd, capture_output=True, text=True, input=None, check=False, **_kwargs):
-        if cmd[0] == "ssh" and cmd[-3:] == ["sh", "-lc", 'printf "%s" "$HOME"']:
+        if _is_ssh_remote_command(cmd, "sh", "-c", 'printf "%s" "$HOME"'):
             return subprocess.CompletedProcess(cmd, 0, stdout="/home/pi", stderr="")
         if cmd[0] == "ssh":
             return next(statuses)
@@ -985,7 +1035,7 @@ def test_remote_service_host_retries_remote_home_lookup(monkeypatch) -> None:
     calls = {"home": 0}
 
     def fake_run(cmd, capture_output=True, text=True, input=None, check=False, **_kwargs):
-        if cmd[0] == "ssh" and cmd[-3:] == ["sh", "-lc", 'printf "%s" "$HOME"']:
+        if _is_ssh_remote_command(cmd, "sh", "-c", 'printf "%s" "$HOME"'):
             calls["home"] += 1
             if calls["home"] == 1:
                 return subprocess.CompletedProcess(cmd, 255, stdout="", stderr="connection reset")
@@ -1014,7 +1064,7 @@ def test_remote_service_host_retries_transient_agent_failure(monkeypatch) -> Non
     calls = {"agent": 0}
 
     def fake_run(cmd, capture_output=True, text=True, input=None, check=False, **_kwargs):
-        if cmd[0] == "ssh" and cmd[-3:] == ["sh", "-lc", 'printf "%s" "$HOME"']:
+        if _is_ssh_remote_command(cmd, "sh", "-c", 'printf "%s" "$HOME"'):
             return subprocess.CompletedProcess(cmd, 0, stdout="/home/pi", stderr="")
         if cmd[0] == "ssh":
             calls["agent"] += 1
@@ -1041,13 +1091,13 @@ def test_remote_service_host_retries_transient_agent_failure(monkeypatch) -> Non
 
 def test_doctor_remote_host_reports_success(monkeypatch) -> None:
     def fake_run(cmd, capture_output=True, text=True, input=None, check=False, **_kwargs):
-        if cmd[0] == "ssh" and cmd[-3:] == ["sh", "-lc", 'printf "%s" "$HOME"']:
+        if _is_ssh_remote_command(cmd, "sh", "-c", 'printf "%s" "$HOME"'):
             return subprocess.CompletedProcess(cmd, 0, stdout="/home/pi", stderr="")
         if cmd[0] == "ssh":
             return subprocess.CompletedProcess(
                 cmd,
                 0,
-                stdout='{"data":{"agent":"yes","agent_path":"/home/pi/wifi-pipeline/bin/wifi-pipeline-agent","agent_protocol":"capture-agent/v1","agent_version":"3.0.0","appliance_service":"wifi-pipeline-appliance.service","appliance_service_active":"yes","appliance_service_enabled":"yes","capture_dir":"/home/pi/wifi-pipeline/captures","capture_dir_exists":"yes","capture_dir_writable":"yes","checksum_file":"yes","checksum_value":"abcd","complete_marker":"yes","control_mode":"agent","health_endpoint":"http://0.0.0.0:8741/health","health_path":"/health","health_port":"8741","health_service":"wifi-pipeline-health.service","health_socket":"wifi-pipeline-health.socket","health_socket_active":"yes","health_socket_enabled":"yes","helper":"yes","helper_path":"/home/pi/.local/bin/wifi-pipeline-capture","helper_version":"3.0.0","install_profile":"appliance","interface_exists":"yes","privilege_mode":"sudoers_runner","privileged_runner":"yes","privileged_runner_path":"/usr/local/bin/wifi-pipeline-capture-privileged","remote_root":"/home/pi/wifi-pipeline","remote_size_bytes":"4","service":"yes","service_path":"/home/pi/.local/bin/wifi-pipeline-service","service_status":"idle","service_version":"3.0.0","state_dir":"/home/pi/wifi-pipeline/state","state_dir_exists":"yes","state_dir_writable":"yes","tcpdump":"yes"},"ok":true,"protocol":"capture-agent/v1","returncode":0}\n',
+                stdout='{"data":{"agent":"yes","agent_path":"/home/pi/wifi-pipeline/bin/wifi-pipeline-agent","agent_protocol":"capture-agent/v1","agent_version":"3.0.0","appliance_service":"wifi-pipeline-appliance.service","appliance_service_active":"yes","appliance_service_enabled":"yes","capture_dir":"/home/pi/wifi-pipeline/captures","capture_dir_exists":"yes","capture_dir_writable":"yes","checksum_file":"yes","checksum_value":"abcd","complete_marker":"yes","control_mode":"agent","health_endpoint":"http://0.0.0.0:8741/health","health_path":"/health","health_port":"8741","health_service":"wifi-pipeline-health.service","health_socket":"wifi-pipeline-health.socket","health_socket_active":"yes","health_socket_enabled":"yes","helper":"yes","helper_path":"/home/pi/.local/bin/wifi-pipeline-capture","helper_version":"3.0.0","install_profile":"appliance","interface_exists":"yes","iw":"yes","privilege_mode":"sudoers_runner","privileged_runner":"yes","privileged_runner_path":"/usr/local/bin/wifi-pipeline-capture-privileged","remote_root":"/home/pi/wifi-pipeline","remote_size_bytes":"4","service":"yes","service_path":"/home/pi/.local/bin/wifi-pipeline-service","service_status":"idle","service_version":"3.0.0","state_dir":"/home/pi/wifi-pipeline/state","state_dir_exists":"yes","state_dir_writable":"yes","tcpdump":"yes"},"ok":true,"protocol":"capture-agent/v1","returncode":0}\n',
                 stderr="",
             )
         return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="bad")
@@ -1087,6 +1137,7 @@ def test_doctor_remote_host_reports_success(monkeypatch) -> None:
     assert report["remote"]["service_status"] == "idle"
     assert report["remote"]["agent_version"] == "3.0.0"
     assert report["remote"]["protocol_compatible"] is True
+    assert report["remote"]["iw"] is True
     assert report["remote"]["version_compatible"] is True
     assert report["remote"]["install_profile"] == "appliance"
     assert report["remote"]["health_endpoint"] == "http://raspberrypi:8741/health"
@@ -1106,13 +1157,13 @@ def test_doctor_remote_host_reports_success(monkeypatch) -> None:
 
 def test_doctor_remote_host_reports_interrupted_service_with_recovery_reason(monkeypatch) -> None:
     def fake_run(cmd, capture_output=True, text=True, input=None, check=False, **_kwargs):
-        if cmd[0] == "ssh" and cmd[-3:] == ["sh", "-lc", 'printf "%s" "$HOME"']:
+        if _is_ssh_remote_command(cmd, "sh", "-c", 'printf "%s" "$HOME"'):
             return subprocess.CompletedProcess(cmd, 0, stdout="/home/pi", stderr="")
         if cmd[0] == "ssh":
             return subprocess.CompletedProcess(
                 cmd,
                 0,
-                stdout='{"data":{"agent":"yes","agent_path":"/home/pi/wifi-pipeline/bin/wifi-pipeline-agent","agent_protocol":"capture-agent/v1","agent_version":"3.0.0","capture_dir":"/home/pi/wifi-pipeline/captures","capture_dir_exists":"yes","capture_dir_writable":"yes","control_mode":"agent","health_endpoint":"http://0.0.0.0:8741/health","health_path":"/health","health_port":"8741","health_socket_active":"yes","health_socket_enabled":"yes","appliance_service_active":"yes","appliance_service_enabled":"yes","helper":"yes","helper_path":"/home/pi/.local/bin/wifi-pipeline-capture","helper_version":"3.0.0","install_profile":"appliance","interface_exists":"yes","last_exit_code":"130","last_result":"interrupted_reboot","privilege_mode":"sudoers_runner","recovery_reason":"reboot","remote_root":"/home/pi/wifi-pipeline","service":"yes","service_path":"/home/pi/.local/bin/wifi-pipeline-service","service_status":"interrupted","service_version":"3.0.0","stale_pid_cleaned":"yes","state_dir":"/home/pi/wifi-pipeline/state","state_dir_exists":"yes","state_dir_writable":"yes","tcpdump":"yes"},"ok":true,"protocol":"capture-agent/v1","returncode":0}\n',
+                stdout='{"data":{"agent":"yes","agent_path":"/home/pi/wifi-pipeline/bin/wifi-pipeline-agent","agent_protocol":"capture-agent/v1","agent_version":"3.0.0","capture_dir":"/home/pi/wifi-pipeline/captures","capture_dir_exists":"yes","capture_dir_writable":"yes","control_mode":"agent","health_endpoint":"http://0.0.0.0:8741/health","health_path":"/health","health_port":"8741","health_socket_active":"yes","health_socket_enabled":"yes","appliance_service_active":"yes","appliance_service_enabled":"yes","helper":"yes","helper_path":"/home/pi/.local/bin/wifi-pipeline-capture","helper_version":"3.0.0","install_profile":"appliance","interface_exists":"yes","iw":"yes","last_exit_code":"130","last_result":"interrupted_reboot","privilege_mode":"sudoers_runner","recovery_reason":"reboot","remote_root":"/home/pi/wifi-pipeline","service":"yes","service_path":"/home/pi/.local/bin/wifi-pipeline-service","service_status":"interrupted","service_version":"3.0.0","stale_pid_cleaned":"yes","state_dir":"/home/pi/wifi-pipeline/state","state_dir_exists":"yes","state_dir_writable":"yes","tcpdump":"yes"},"ok":true,"protocol":"capture-agent/v1","returncode":0}\n',
                 stderr="",
             )
         return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="bad")
@@ -1151,7 +1202,7 @@ def test_doctor_remote_host_reports_interrupted_service_with_recovery_reason(mon
 
 def test_doctor_remote_host_reports_missing_helper(monkeypatch) -> None:
     def fake_run(cmd, capture_output=True, text=True, input=None, check=False, **_kwargs):
-        if cmd[0] == "ssh" and cmd[-3:] == ["sh", "-lc", 'printf "%s" "$HOME"']:
+        if _is_ssh_remote_command(cmd, "sh", "-c", 'printf "%s" "$HOME"'):
             return subprocess.CompletedProcess(cmd, 0, stdout="/home/pi", stderr="")
         if cmd[0] == "ssh":
             if "wifi-pipeline-agent" in cmd[-1]:
@@ -1161,6 +1212,7 @@ def test_doctor_remote_host_reports_missing_helper(monkeypatch) -> None:
                 0,
                 stdout=(
                     "tcpdump=yes\n"
+                    "iw=no\n"
                     "helper=no\n"
                     "helper_path=/home/pi/wifi-pipeline/bin/wifi-pipeline-capture\n"
                     "service=no\n"
@@ -1197,7 +1249,7 @@ def test_doctor_remote_host_reports_missing_helper(monkeypatch) -> None:
 
 def test_remote_service_host_reports_last_capture(monkeypatch) -> None:
     def fake_run(cmd, capture_output=True, text=True, input=None, check=False, **_kwargs):
-        if cmd[0] == "ssh" and cmd[-3:] == ["sh", "-lc", 'printf "%s" "$HOME"']:
+        if _is_ssh_remote_command(cmd, "sh", "-c", 'printf "%s" "$HOME"'):
             return subprocess.CompletedProcess(cmd, 0, stdout="/home/pi", stderr="")
         if cmd[0] == "ssh":
             return subprocess.CompletedProcess(

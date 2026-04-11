@@ -7,6 +7,13 @@ import sys
 from typing import Dict, Optional
 
 from .environment import IS_MACOS, IS_WINDOWS, default_product_mode, pick_interface, resolve_product_profile
+from .secure_mesh import (
+    DEFAULT_SECURE_MESH_PRIVATE_DIR,
+    DEFAULT_SECURE_MESH_REPLAY_CACHE,
+    DEFAULT_SECURE_MESH_REGISTRY,
+    SECURE_MESH_PROTOCOL,
+    redact_mesh_secrets,
+)
 from .ui import ask, ask_int, confirm, ok, section, warn
 
 DEFAULT_CONFIG = {
@@ -46,6 +53,27 @@ DEFAULT_CONFIG = {
     "remote_health_port": 8741,
     "remote_dest_dir": "./pipeline_output/remote_imports",
     "remote_poll_interval": 8,
+    # Secure mesh public/local foundation. Private keys live outside lab.json.
+    "secure_mesh_enabled": False,
+    "secure_mesh_protocol": SECURE_MESH_PROTOCOL,
+    "secure_mesh_registry_path": DEFAULT_SECURE_MESH_REGISTRY,
+    "secure_mesh_private_dir": DEFAULT_SECURE_MESH_PRIVATE_DIR,
+    "secure_mesh_replay_cache_path": DEFAULT_SECURE_MESH_REPLAY_CACHE,
+    "secure_mesh_default_transport": "ssh",
+    "secure_mesh_discovery_hints": [],
+    "secure_mesh_discovery_hint_files": [],
+    "secure_mesh_require_approval_for_sensitive": False,
+    "secure_mesh_sensitive_actions": [
+        "capture.start",
+        "capture.stop",
+        "service.start",
+        "service.stop",
+        "config.update",
+        "mesh.rotate_key",
+        "mesh.revoke",
+    ],
+    "secure_mesh_require_trusted_route": True,
+    "secure_mesh_preferred_transports": ["wireguard", "ssh", "ethernet", "serial", "hotspot", "bluetooth", "radio"],
     # ── extraction ────────────────────────────────────────────────────────────
     "video_port": 5004,
     "protocol": "udp",
@@ -127,7 +155,7 @@ def load_config(
     selected_path = path or "lab.json"
     if selected_path and os.path.exists(selected_path):
         try:
-            with open(selected_path, "r", encoding="utf-8") as handle:
+            with open(selected_path, "r", encoding="utf-8-sig") as handle:
                 loaded = json.load(handle)
             if not isinstance(loaded, dict):
                 raise ValueError(f"Config file must contain a JSON object: {selected_path}")
@@ -141,7 +169,7 @@ def load_config(
 
 
 def save_config(config: Dict[str, object], path: Optional[str] = "lab.json", *, quiet: bool = False) -> None:
-    sanitized = normalize_config(config, quiet=True)
+    sanitized = redact_mesh_secrets(normalize_config(config, quiet=True))
     # Never persist the raw password to disk
     sanitized["wpa_password"] = ""
     selected_path = path or "lab.json"

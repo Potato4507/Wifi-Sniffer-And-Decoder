@@ -130,7 +130,7 @@ def _probe_remote_appliance(host: str, *, health_port: int, timeout: float, user
 
     ssh_user = str(data.get("ssh_user") or user_hint or "").strip()
     ssh_target = f"{ssh_user}@{host}" if ssh_user else host
-    return {
+    record = {
         "host": host,
         "ssh_target": ssh_target,
         "health_endpoint": endpoint,
@@ -146,6 +146,20 @@ def _probe_remote_appliance(host: str, *, health_port: int, timeout: float, user
         "remote_root": str(data.get("remote_root") or ""),
         "ssh_user": ssh_user,
     }
+    for source_key, target_key in (
+        ("secure_mesh_device_id", "secure_mesh_device_id"),
+        ("mesh_device_id", "secure_mesh_device_id"),
+        ("device_id", "secure_mesh_device_id"),
+        ("secure_mesh_fingerprint", "secure_mesh_fingerprint"),
+        ("mesh_fingerprint", "secure_mesh_fingerprint"),
+        ("fingerprint", "secure_mesh_fingerprint"),
+        ("wireguard_endpoint", "wireguard_endpoint"),
+        ("hotspot_ssid", "hotspot_ssid"),
+    ):
+        value = str(data.get(source_key) or "").strip()
+        if value and not record.get(target_key):
+            record[target_key] = value
+    return record
 
 
 def discover_remote_appliances(

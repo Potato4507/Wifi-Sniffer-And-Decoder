@@ -54,11 +54,13 @@ iw dev
 From PowerShell in the repository folder on Windows:
 
 ```powershell
+.\discover_remote.ps1 -Save
 .\setup_remote.ps1
 ```
 
 What this does:
 
+- looks for appliance-style Raspberry Pi or Ubuntu capture nodes and can save the result into config
 - installs missing local dependencies
 - helps set up SSH
 - bootstraps the Linux capture device
@@ -101,6 +103,16 @@ After setup, this is usually the only command you need:
 .\run_remote.ps1 -Host pi@raspberrypi -Interface wlan0
 ```
 
+### Browser operator console
+
+If you want one place to see the available tools, required inputs, detected local adapters, the configured Pi, artifacts, and action logs:
+
+```powershell
+python .\videopipeline.py web
+```
+
+The dashboard includes an Operator Console section with tool requirements, a Detected Devices panel, saved remote settings, and buttons for discovery, remote doctor, bootstrap, service status, remote capture + pull, and pulling an existing capture.
+
 ### Advanced Windows remote workflow
 
 If you want the raw CLI route instead of the helper scripts:
@@ -108,7 +120,7 @@ If you want the raw CLI route instead of the helper scripts:
 ```powershell
 .\install_deps.ps1
 .\.venv\Scripts\Activate.ps1
-python .\videopipeline.py discover-remote
+.\discover_remote.ps1 -Save
 python .\videopipeline.py pair-remote --host pi@raspberrypi
 python .\videopipeline.py bootstrap-remote --host pi@raspberrypi --install-profile appliance
 python .\videopipeline.py doctor --host pi@raspberrypi --interface wlan0
@@ -118,6 +130,11 @@ python .\videopipeline.py start-remote --host pi@raspberrypi --interface wlan0 -
 Notes:
 
 - `discover-remote` looks for appliance-style Linux capture nodes from their health endpoint
+- secure mesh discovery can ingest untrusted route hints with `mesh discover --hint bluetooth=AA:BB:CC:DD --hint-device raspi-sniffer` or `--hints-file`; fingerprints still decide trust
+- route planning is available with `mesh route-plan --device raspi-sniffer`, and command preparation is available with `mesh prepare-command`; both stop short of automatic remote execution
+- secure mesh command envelopes are available for already-paired devices with `mesh seal-command` and `mesh open-command`; see `docs/SECURE_DEVICE_MESH.md`
+- sensitive secure mesh commands can be operator-gated with `mesh approval-code`, `mesh seal-command --approval-code ... --require-approval`, and `mesh open-command --approval-code ... --require-approval`
+- store-and-forward links can carry encrypted command bundles with `mesh bundle-create` and `mesh bundle-list`
 - `bootstrap-remote` installs the managed capture agent and remote helper scripts
 - `doctor` is the fastest way to find SSH, privilege, or interface issues before a live run
 - `doctor` and `preflight` are capability-driven, so they will tell you whether the current remote path is supported, limited, or blocked
@@ -234,6 +251,7 @@ Keep in mind that importing a pcap does not guarantee a meaningful decode. The p
 
 | Script | Use it for |
 |---|---|
+| `discover_remote.ps1` | Finding appliance-style Ubuntu or Raspberry Pi OS capture nodes and optionally saving one into config |
 | `setup_remote.ps1` | First-time Windows setup |
 | `validate_remote.ps1` | Testing the Windows + Linux remote workflow |
 | `run_remote.ps1` | Daily Windows remote capture and processing |

@@ -14,6 +14,17 @@ Highlights:
 - added plugin profiles and enable/disable controls for builtin platform plugins
 - added passive enrichment and compatibility wiring so the legacy Wi-Fi workflow still works alongside the new platform
 - added broad unit and integration coverage for the platform, monitor runtime, connector collectors, dashboard, CLI, storage, and packaging
+- added a Windows `discover_remote.ps1` helper plus `discover-remote --save/--select` so newly discovered Raspberry Pi appliances can be saved straight into config
+- added a Wi-Fi operator console to the web dashboard with tool requirements, detected local/remote devices, saved Raspberry Pi settings, and remote discovery/doctor/bootstrap/capture controls
+- documented the planned secure device mesh: pre-paired device identity, WireGuard-first encrypted transport, optional second-factor PSKs, replay-safe command envelopes, and transport-independent discovery
+- added the phase-two secure mesh foundation with public device registry records, role permissions, fingerprints, revocation, secret redaction, config defaults, and local `mesh` registry CLI commands
+- added phase-three secure mesh local identity generation with Ed25519/X25519 keys, public pairing bundle export/import, fingerprint-gated trust, and one-time pairing token issuance
+- added phase-four secure mesh discovery with trusted/untrusted route inventory, registry/config/appliance hints, route ranking, and `mesh discover` / `mesh paths` CLI commands
+- added phase-five WireGuard bootstrap with local WireGuard key generation, public transport metadata, pairing-bundle propagation, and `mesh wg-init` / `mesh wg-render` config rendering commands
+- added phase-six custom command envelopes with X25519/HKDF-derived ChaCha20-Poly1305 encryption, Ed25519 signatures, expiry checks, role/revocation checks, replay caches, and `mesh seal-command` / `mesh open-command`
+- added phase-seven transport-independent discovery hints for LAN, hotspot, Bluetooth, serial, radio, Ethernet, WireGuard, SSH, and hint-file routes while preserving fingerprint-only trust
+- added phase-eight optional operator approval codes for sensitive encrypted commands plus store-and-forward command bundles with `mesh approval-code`, `mesh bundle-create`, and `mesh bundle-list`
+- added phase-nine route planning and prepared encrypted command artifacts with `mesh route-plan` and `mesh prepare-command`, requiring trusted routes by default
 
 ## 3.0.0
 

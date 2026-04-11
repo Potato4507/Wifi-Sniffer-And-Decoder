@@ -44,6 +44,35 @@ from .remote import (
     start_remote_capture,
     watch_remote_capture,
 )
+from .secure_mesh import (
+    MeshDeviceRecord,
+    MeshReplayCache,
+    MeshRoutePlan,
+    default_private_dir,
+    default_replay_cache_path,
+    discover_mesh_devices,
+    generate_local_identity,
+    generate_mesh_approval_code,
+    generate_pairing_token,
+    identity_path,
+    import_pairing_bundle,
+    init_wireguard_identity,
+    init_registry,
+    load_local_identity,
+    load_mesh_command_bundle,
+    load_registry,
+    render_wireguard_config,
+    mesh_command_bundle_summary,
+    mesh_paths_for_device,
+    open_mesh_command,
+    parse_mesh_transport_hint,
+    pairing_token_hash,
+    seal_mesh_command,
+    select_mesh_route,
+    wireguard_identity_path,
+    write_mesh_command_bundle,
+    write_pairing_bundle,
+)
 from .status_language import build_surface_status_bundle
 from .ui import (
     BOLD, CYAN, DIM, GREEN, RED, RESET, YELLOW,
@@ -283,16 +312,537 @@ def run_discover_remote(
         warn("No appliance-style capture nodes responded on the local network.")
         return []
 
-    for record in results:
+    for index, record in enumerate(results, start=1):
         label = str(record.get("device_name") or record.get("host") or "appliance")
         ssh_target = str(record.get("ssh_target") or record.get("host") or "")
         health_endpoint = str(record.get("health_endpoint") or "")
         install_profile = str(record.get("install_profile") or "standard")
-        info(f"{label}: {ssh_target} ({install_profile})")
+        info(f"[{index}] {label}: {ssh_target} ({install_profile})")
         if health_endpoint:
             info(f"  health: {health_endpoint}")
     done(f"Discovered {len(results)} appliance node(s).")
     return results
+
+
+def _save_discovered_remote(
+    config: Dict[str, object],
+    results: list[Dict[str, str]],
+    *,
+    config_path: Optional[str] = None,
+    select_index: Optional[int] = None,
+) -> bool:
+    if not results:
+        err("No discovery results are available to save.")
+        return False
+
+    selected: Optional[Dict[str, str]] = None
+    if select_index is not None:
+        index = int(select_index) - 1
+        if index < 0 or index >= len(results):
+            err(f"--select must be between 1 and {len(results)} for the current discovery results.")
+            return False
+        selected = results[index]
+    elif len(results) == 1:
+        selected = results[0]
+    elif hasattr(sys.stdin, "isatty") and sys.stdin.isatty():
+        labels = [
+            f"{record.get('device_name') or record.get('host') or 'appliance'} -> {record.get('ssh_target') or record.get('host') or ''}"
+            for record in results
+        ]
+        selected = results[choose("Select a discovered appliance to save", labels, default=0)]
+    else:
+        err("Multiple appliance nodes were discovered. Re-run with --select <n> to choose which one to save.")
+        return False
+
+    selected = selected or results[0]
+    updated = dict(config)
+    ssh_target = str(selected.get("ssh_target") or selected.get("host") or "").strip()
+    if ssh_target:
+        updated["remote_host"] = ssh_target
+
+    install_profile = str(selected.get("install_profile") or "").strip()
+    if install_profile:
+        updated["remote_install_profile"] = install_profile
+
+    health_port = selected.get("health_port")
+    try:
+        if health_port not in (None, ""):
+            updated["remote_health_port"] = int(health_port)
+    except (TypeError, ValueError):
+        pass
+
+    capture_dir = str(selected.get("capture_dir") or "").strip()
+    if capture_dir:
+        updated["remote_path"] = capture_dir.rstrip("/") + "/"
+
+    save_target = config_path or "lab.json"
+    save_config(updated, config_path)
+    config.update(updated)
+
+    ok(f"Saved discovered appliance {ssh_target or selected.get('host') or 'node'} to {save_target}.")
+    return True
+
+
+def _mesh_inline_hints_from_args(args) -> list[Dict[str, str]]:
+    hints: list[Dict[str, str]] = []
+    hint_device = str(getattr(args, "hint_device", "") or "").strip()
+    mesh_command = str(getattr(args, "mesh_command", "") or "")
+    if not hint_device and mesh_command in ("paths", "route-plan"):
+        hint_device = str(getattr(args, "device_id", "") or "").strip()
+    if not hint_device and mesh_command == "prepare-command":
+        hint_device = str(getattr(args, "receiver", "") or "").strip()
+    hint_fingerprint = str(getattr(args, "hint_fingerprint", "") or "").strip()
+    for item in list(getattr(args, "hint", None) or []):
+        hints.append(
+            parse_mesh_transport_hint(
+                str(item),
+                device_id_hint=hint_device,
+                fingerprint_hint=hint_fingerprint,
+                source="operator_hint",
+            )
+        )
+    return hints
+
+
+def _mesh_allowed_transports_from_args(config: Dict[str, object], args) -> list[str]:
+    requested = list(getattr(args, "transport", None) or [])
+    if requested:
+        return [str(item).strip() for item in requested if str(item or "").strip()]
+    configured = config.get("secure_mesh_preferred_transports")
+    if isinstance(configured, str):
+        return [item.strip() for item in configured.split(",") if item.strip()]
+    return [str(item).strip() for item in list(configured or []) if str(item or "").strip()]
+
+
+def _mesh_require_trusted_route(config: Dict[str, object], args) -> bool:
+    if bool(getattr(args, "allow_untrusted_route", False)):
+        return False
+    return bool(config.get("secure_mesh_require_trusted_route", True))
+
+
+def _mesh_discovery_records_from_args(config: Dict[str, object], args) -> list:
+    no_probe = bool(getattr(args, "no_probe", False))
+    return discover_mesh_devices(
+        config,
+        appliance_nodes=[] if no_probe else None,
+        transport_hints=_mesh_inline_hints_from_args(args),
+        hint_files=list(getattr(args, "hints_file", None) or []),
+        networks=list(getattr(args, "network", None) or []),
+        health_port=getattr(args, "health_port", None),
+        timeout=float(getattr(args, "timeout", 0.35) or 0.35),
+        max_hosts=int(getattr(args, "max_hosts", 64) or 64),
+    )
+
+
+def _print_mesh_route_plan(plan: MeshRoutePlan, *, as_json: bool = False) -> None:
+    if as_json:
+        print(json.dumps(plan.to_dict(), indent=2, sort_keys=True))
+        return
+    section("Secure Mesh Route")
+    if not plan.selected:
+        warn(plan.reason)
+        return
+    transport = plan.transport
+    ok(f"Selected {transport.transport_type} route to {plan.device_id}: {transport.target}")  # type: ignore[union-attr]
+    info(plan.reason)
+    if plan.discovery:
+        info(f"Trust: {plan.discovery.trust_status} ({plan.discovery.trust_reason})")
+
+
+def run_mesh_command(config: Dict[str, object], args) -> bool:
+    command = str(getattr(args, "mesh_command", "") or "devices")
+    registry = load_registry(config)
+
+    if command == "init":
+        registry = init_registry(config)
+        section("Secure Mesh")
+        ok(f"Registry ready: {registry.path}")
+        info(f"Private key directory (future phase): {default_private_dir(config)}")
+        info("Use `mesh init-identity` to generate this device's Ed25519/X25519 key material.")
+        return True
+
+    if command == "init-identity":
+        try:
+            identity = generate_local_identity(
+                config,
+                device_id=str(getattr(args, "device_id", "") or ""),
+                role=str(getattr(args, "role", "") or ""),
+                overwrite=bool(getattr(args, "overwrite", False)),
+            )
+            registry.add_device(identity.to_public_record(), replace=True)
+            registry.save()
+        except (FileExistsError, ValueError) as exc:
+            err(str(exc))
+            return False
+        section("Secure Mesh")
+        ok(f"Generated local identity for {identity.device_id} ({identity.role}).")
+        info(f"Private identity file: {identity_path(config, device_id=identity.device_id)}")
+        info(f"Fingerprint: {identity.fingerprint}")
+        warn("Keep the private identity file on this device only. Share pairing bundles, not private keys.")
+        return True
+
+    if command == "devices":
+        include_revoked = not bool(getattr(args, "active_only", False))
+        section("Secure Mesh Devices")
+        info(f"Registry: {registry.path}")
+        records = registry.list_devices(include_revoked=include_revoked)
+        if not records:
+            warn("No secure mesh devices are registered yet.")
+            return True
+        for record in records:
+            status = "revoked" if record.revoked else "active"
+            info(f"{record.device_id} [{record.role}] {status}")
+            info(f"  fingerprint: {record.fingerprint}")
+            info(f"  actions    : {', '.join(record.allowed_actions) if record.allowed_actions else '(none)'}")
+            if record.allowed_tunnel_ip:
+                info(f"  tunnel ip  : {record.allowed_tunnel_ip}")
+        return True
+
+    if command in ("discover", "paths"):
+        try:
+            records = _mesh_discovery_records_from_args(config, args)
+            if command == "paths":
+                records = mesh_paths_for_device(records, str(getattr(args, "device_id", "") or ""))
+        except (FileNotFoundError, OSError, ValueError, json.JSONDecodeError) as exc:
+            err(str(exc))
+            return False
+        payload = [record.to_dict() for record in records]
+        if bool(getattr(args, "json", False)):
+            print(json.dumps(payload, indent=2))
+            return True
+        section("Secure Mesh Discovery" if command == "discover" else "Secure Mesh Paths")
+        if not records:
+            warn("No mesh discovery records matched.")
+            return True
+        for record in records:
+            label = record.matched_device_id or record.device_id_hint or "(unknown device)"
+            status = record.trust_status
+            info(f"{label} [{status}] from {record.source}")
+            info(f"  reason: {record.trust_reason}")
+            if record.fingerprint_hint:
+                info(f"  fingerprint: {record.fingerprint_hint}")
+            best = record.best_transport()
+            if best:
+                info(f"  best: {best.transport_type} -> {best.target} ({best.status})")
+            for transport in record.transports:
+                info(f"  path: {transport.transport_type} -> {transport.target} [{transport.status}]")
+        return True
+
+    if command == "route-plan":
+        try:
+            records = _mesh_discovery_records_from_args(config, args)
+            plan = select_mesh_route(
+                records,
+                str(getattr(args, "device_id", "") or ""),
+                allowed_transports=_mesh_allowed_transports_from_args(config, args),
+                require_trusted=_mesh_require_trusted_route(config, args),
+            )
+        except (FileNotFoundError, OSError, ValueError, json.JSONDecodeError) as exc:
+            err(str(exc))
+            return False
+        _print_mesh_route_plan(plan, as_json=bool(getattr(args, "json", False)))
+        return plan.selected or bool(getattr(args, "json", False))
+
+    if command == "add-device":
+        try:
+            record = MeshDeviceRecord.create(
+                device_id=str(getattr(args, "device_id", "") or ""),
+                role=str(getattr(args, "role", "") or ""),
+                public_identity_key=str(getattr(args, "identity_key", "") or ""),
+                public_encryption_key=str(getattr(args, "encryption_key", "") or ""),
+                allowed_actions=getattr(args, "action", None),
+                allowed_tunnel_ip=str(getattr(args, "tunnel_ip", "") or ""),
+            )
+            registry.add_device(record, replace=bool(getattr(args, "replace", False)))
+            registry.save()
+        except (KeyError, ValueError) as exc:
+            err(str(exc))
+            return False
+        section("Secure Mesh")
+        ok(f"Registered {record.device_id} ({record.role}) in {registry.path}")
+        info(f"Fingerprint: {record.fingerprint}")
+        return True
+
+    if command == "export-bundle":
+        try:
+            identity = load_local_identity(config, device_id=str(getattr(args, "device_id", "") or ""))
+            existing_record = registry.get_device(identity.device_id)
+            existing_actions = list(existing_record.allowed_actions) if existing_record else None
+            existing_tunnel_ip = str(existing_record.allowed_tunnel_ip or "") if existing_record else ""
+            existing_transport_hints = dict(existing_record.transport_hints) if existing_record else {}
+            existing_metadata = dict(existing_record.metadata) if existing_record else {}
+            bundle_path = write_pairing_bundle(
+                identity,
+                Path(str(getattr(args, "out", "") or "")),
+                allowed_actions=getattr(args, "action", None) or existing_actions,
+                allowed_tunnel_ip=str(getattr(args, "tunnel_ip", "") or existing_tunnel_ip),
+                transport_hints=existing_transport_hints,
+                metadata=existing_metadata,
+            )
+        except (FileNotFoundError, ValueError) as exc:
+            err(str(exc))
+            return False
+        section("Secure Mesh")
+        ok(f"Wrote public pairing bundle: {bundle_path}")
+        info(f"Fingerprint to verify out-of-band: {identity.fingerprint}")
+        return True
+
+    if command == "import-bundle":
+        try:
+            record = import_pairing_bundle(
+                config,
+                bundle_path=Path(str(getattr(args, "path", "") or "")),
+                expected_fingerprint=str(getattr(args, "trust_fingerprint", "") or ""),
+                replace=bool(getattr(args, "replace", False)),
+            )
+        except (FileNotFoundError, ValueError) as exc:
+            err(str(exc))
+            return False
+        section("Secure Mesh")
+        ok(f"Imported trusted public pairing bundle for {record.device_id} ({record.role}).")
+        info(f"Fingerprint: {record.fingerprint}")
+        return True
+
+    if command == "issue-token":
+        device_id = str(getattr(args, "device_id", "") or "")
+        try:
+            identity = load_local_identity(config, device_id=device_id)
+            token = generate_pairing_token()
+            digest = pairing_token_hash(token, identity.device_id, identity.fingerprint)
+        except (FileNotFoundError, ValueError) as exc:
+            err(str(exc))
+            return False
+        section("Secure Mesh")
+        ok(f"One-time pairing token for {identity.device_id}: {token}")
+        info(f"Token hash for verification logs: {digest}")
+        warn("This token is shown once and is not stored. Treat it like a short-lived secret.")
+        return True
+
+    if command == "approval-code":
+        code = generate_mesh_approval_code()
+        section("Secure Mesh Approval")
+        ok(f"One-time operator approval code: {code}")
+        warn("Share this out-of-band only with the operator sealing/opening the matching command. It is not stored.")
+        return True
+
+    if command == "wg-init":
+        try:
+            identity = init_wireguard_identity(
+                config,
+                device_id=str(getattr(args, "device_id", "") or ""),
+                address=str(getattr(args, "address", "") or ""),
+                listen_port=int(getattr(args, "listen_port", 51820) or 51820),
+                endpoint=str(getattr(args, "endpoint", "") or ""),
+                dns=str(getattr(args, "dns", "") or ""),
+                overwrite=bool(getattr(args, "overwrite", False)),
+            )
+        except (FileExistsError, KeyError, ValueError) as exc:
+            err(str(exc))
+            return False
+        section("Secure Mesh WireGuard")
+        ok(f"Generated WireGuard key material for {identity.device_id}.")
+        info(f"Private WireGuard file: {wireguard_identity_path(config, device_id=identity.device_id)}")
+        info(f"Public key: {identity.public_key}")
+        info(f"Address: {identity.address}")
+        warn("Install rendered configs deliberately; this command does not modify OS network interfaces.")
+        return True
+
+    if command == "wg-render":
+        try:
+            text = render_wireguard_config(
+                config,
+                device_id=str(getattr(args, "device_id", "") or ""),
+                peer_device_id=str(getattr(args, "peer_device_id", "") or ""),
+                persistent_keepalive=int(getattr(args, "persistent_keepalive", 25) or 0),
+            )
+            out_path = str(getattr(args, "out", "") or "").strip()
+            if out_path:
+                target = Path(out_path).expanduser().resolve()
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(text, encoding="utf-8")
+            else:
+                print(text, end="")
+        except (FileNotFoundError, KeyError, ValueError) as exc:
+            err(str(exc))
+            return False
+        if out_path:
+            section("Secure Mesh WireGuard")
+            ok(f"Wrote WireGuard config: {target}")
+        return True
+
+    if command == "seal-command":
+        out_path = Path(str(getattr(args, "out", "") or "")).expanduser().resolve()
+        body_text = str(getattr(args, "body", "{}") or "{}")
+        try:
+            approval_code = str(getattr(args, "approval_code", "") or "").strip()
+            if bool(getattr(args, "require_approval", False)) and not approval_code:
+                raise ValueError("--require-approval needs --approval-code")
+            try:
+                body = json.loads(body_text)
+            except json.JSONDecodeError:
+                body = body_text
+            envelope = seal_mesh_command(
+                config,
+                sender_device_id=str(getattr(args, "sender", "") or ""),
+                receiver_device_id=str(getattr(args, "receiver", "") or ""),
+                command=str(getattr(args, "mesh_action", "") or ""),
+                body=body,
+                counter=int(getattr(args, "counter", 0) or 0),
+                ttl_seconds=int(getattr(args, "ttl", 60) or 60),
+                approval_code=approval_code,
+                approval_ttl_seconds=int(getattr(args, "approval_ttl", 300) or 300),
+            )
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(json.dumps(envelope.to_dict(), indent=2, sort_keys=True), encoding="utf-8")
+        except (FileNotFoundError, KeyError, ValueError) as exc:
+            err(str(exc))
+            return False
+        section("Secure Mesh Command")
+        ok(f"Wrote encrypted envelope: {out_path}")
+        info(f"Message ID: {envelope.message_id}")
+        info(f"Expires: {envelope.expires_at_utc}")
+        return True
+
+    if command == "prepare-command":
+        out_path = Path(str(getattr(args, "out", "") or "")).expanduser().resolve()
+        bundle_path_text = str(getattr(args, "bundle_out", "") or "").strip()
+        body_text = str(getattr(args, "body", "{}") or "{}")
+        try:
+            records = _mesh_discovery_records_from_args(config, args)
+            plan = select_mesh_route(
+                records,
+                str(getattr(args, "receiver", "") or ""),
+                allowed_transports=_mesh_allowed_transports_from_args(config, args),
+                require_trusted=_mesh_require_trusted_route(config, args),
+            )
+            if not plan.selected:
+                raise ValueError(plan.reason)
+            approval_code = str(getattr(args, "approval_code", "") or "").strip()
+            if bool(getattr(args, "require_approval", False)) and not approval_code:
+                raise ValueError("--require-approval needs --approval-code")
+            try:
+                body = json.loads(body_text)
+            except json.JSONDecodeError:
+                body = body_text
+            envelope = seal_mesh_command(
+                config,
+                sender_device_id=str(getattr(args, "sender", "") or ""),
+                receiver_device_id=str(getattr(args, "receiver", "") or ""),
+                command=str(getattr(args, "mesh_action", "") or ""),
+                body=body,
+                counter=int(getattr(args, "counter", 0) or 0),
+                ttl_seconds=int(getattr(args, "ttl", 60) or 60),
+                approval_code=approval_code,
+                approval_ttl_seconds=int(getattr(args, "approval_ttl", 300) or 300),
+            )
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(json.dumps(envelope.to_dict(), indent=2, sort_keys=True), encoding="utf-8")
+            bundle_path: Optional[Path] = None
+            if bundle_path_text:
+                route_hint = ""
+                if plan.transport:
+                    route_hint = f"{plan.transport.transport_type}:{plan.transport.target}"
+                bundle_path = write_mesh_command_bundle([envelope], Path(bundle_path_text), route_hint=route_hint)
+        except (FileNotFoundError, OSError, KeyError, ValueError, json.JSONDecodeError) as exc:
+            err(str(exc))
+            return False
+        summary = {
+            "envelope": envelope.metadata(),
+            "envelope_path": str(out_path),
+            "bundle_path": str(bundle_path) if bundle_path else "",
+            "route_plan": plan.to_dict(),
+        }
+        if bool(getattr(args, "json", False)):
+            print(json.dumps(summary, indent=2, sort_keys=True))
+            return True
+        section("Secure Mesh Prepared Command")
+        ok(f"Wrote encrypted envelope: {out_path}")
+        if bundle_path:
+            ok(f"Wrote command bundle: {bundle_path}")
+        if plan.transport:
+            info(f"Prepared for {plan.transport.transport_type}: {plan.transport.target}")
+        info(f"Message ID: {envelope.message_id}")
+        return True
+
+    if command == "open-command":
+        try:
+            envelope_path = Path(str(getattr(args, "envelope", "") or "")).expanduser().resolve()
+            payload = json.loads(envelope_path.read_text(encoding="utf-8"))
+            cache_path_text = str(getattr(args, "replay_cache", "") or "").strip()
+            replay_cache = MeshReplayCache.load(Path(cache_path_text).expanduser().resolve() if cache_path_text else default_replay_cache_path(config))
+            envelope, body = open_mesh_command(
+                config,
+                payload,
+                receiver_device_id=str(getattr(args, "receiver", "") or ""),
+                replay_cache=replay_cache,
+                approval_code=str(getattr(args, "approval_code", "") or ""),
+                require_approval=bool(getattr(args, "require_approval", False)),
+            )
+            replay_cache.save()
+        except (FileNotFoundError, KeyError, ValueError, json.JSONDecodeError) as exc:
+            err(str(exc))
+            return False
+        if bool(getattr(args, "json", False)):
+            print(json.dumps({"envelope": envelope.metadata(), "body": body}, indent=2, sort_keys=True))
+        else:
+            section("Secure Mesh Command")
+            ok(f"Opened command {envelope.command} from {envelope.sender_device_id}.")
+            info(f"Message ID: {envelope.message_id}")
+            info(f"Body: {body}")
+        return True
+
+    if command == "bundle-create":
+        try:
+            envelopes = []
+            for envelope_path_text in list(getattr(args, "envelope", None) or []):
+                envelope_path = Path(str(envelope_path_text)).expanduser().resolve()
+                envelopes.append(json.loads(envelope_path.read_text(encoding="utf-8")))
+            target = write_mesh_command_bundle(
+                envelopes,
+                Path(str(getattr(args, "out", "") or "")),
+                route_hint=str(getattr(args, "route_hint", "") or ""),
+            )
+        except (FileNotFoundError, KeyError, ValueError, json.JSONDecodeError) as exc:
+            err(str(exc))
+            return False
+        section("Secure Mesh Bundle")
+        ok(f"Wrote encrypted command bundle: {target}")
+        info(f"Envelope count: {len(envelopes)}")
+        return True
+
+    if command == "bundle-list":
+        try:
+            bundle_path = Path(str(getattr(args, "bundle", "") or "")).expanduser().resolve()
+            envelopes = load_mesh_command_bundle(bundle_path)
+            summary = mesh_command_bundle_summary(envelopes)
+        except (FileNotFoundError, KeyError, ValueError, json.JSONDecodeError) as exc:
+            err(str(exc))
+            return False
+        if bool(getattr(args, "json", False)):
+            print(json.dumps(summary, indent=2, sort_keys=True))
+            return True
+        section("Secure Mesh Bundle")
+        info(f"Bundle: {bundle_path}")
+        if not summary:
+            warn("No envelopes are in this bundle.")
+            return True
+        for item in summary:
+            info(f"{item.get('message_id')} {item.get('sender_device_id')} -> {item.get('receiver_device_id')} {item.get('command')}")
+        return True
+
+    if command == "revoke":
+        try:
+            record = registry.revoke(str(getattr(args, "device_id", "") or ""))
+            registry.save()
+        except (KeyError, ValueError) as exc:
+            err(str(exc))
+            return False
+        section("Secure Mesh")
+        ok(f"Revoked {record.device_id}.")
+        return True
+
+    err("Unknown mesh command. Use: init, devices, add-device, or revoke.")
+    return False
 
 
 def run_bootstrap_remote(
@@ -577,6 +1127,8 @@ def _print_remote_doctor(report: Dict[str, object]) -> None:
     if appliance_service_enabled is not None:
         print(f"    Appliance svc    : {_status_label(bool(appliance_service_enabled), 'enabled', 'disabled')}")
     print(f"    tcpdump          : {_status_label(bool(remote.get('tcpdump')), 'present', 'missing')}")
+    if "iw" in remote:
+        print(f"    iw               : {_status_label(bool(remote.get('iw')), 'present', 'missing')}")
     print(f"    Helper           : {_status_label(bool(remote.get('helper')), 'present', 'missing')}")
     if remote.get("helper_path"):
         print(f"    Helper path      : {remote.get('helper_path')}")
@@ -1797,7 +2349,20 @@ def main(argv: Optional[list] = None) -> int:
             timeout=float(getattr(args, "timeout", 0.35) or 0.35),
             max_hosts=int(getattr(args, "max_hosts", 64) or 64),
         )
-        return 0 if results else 1
+        if not results:
+            return 1
+        if getattr(args, "save", False):
+            saved = _save_discovered_remote(
+                config,
+                results,
+                config_path=getattr(args, "config", None),
+                select_index=getattr(args, "select", None),
+            )
+            return 0 if saved else 1
+        return 0
+
+    if args.command == "mesh":
+        return 0 if run_mesh_command(config, args) else 1
 
     if args.command == "pair-remote":
         paired = run_pair_remote(

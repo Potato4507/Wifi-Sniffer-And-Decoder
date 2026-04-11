@@ -52,8 +52,25 @@ def _run_remote(
     text: bool = True,
     input: Optional[str] = None,
 ) -> subprocess.CompletedProcess:
+    remote_args = [str(arg) for arg in args]
+    if remote_args and remote_args[0] == "--":
+        remote_args = remote_args[1:]
+    remote_command = shlex.join(remote_args)
+    cmd = _ssh_args(source) + [remote_command]
+    if input is not None:
+        raw_input = input.encode("utf-8") if isinstance(input, str) else input
+        result = subprocess.run(
+            cmd,
+            capture_output=capture_output,
+            text=False,
+            input=raw_input,
+            check=False,
+        )
+        stdout = result.stdout.decode("utf-8", errors="replace") if isinstance(result.stdout, (bytes, bytearray)) else result.stdout
+        stderr = result.stderr.decode("utf-8", errors="replace") if isinstance(result.stderr, (bytes, bytearray)) else result.stderr
+        return subprocess.CompletedProcess(result.args, result.returncode, stdout, stderr)
     return subprocess.run(
-        _ssh_args(source) + args,
+        cmd,
         capture_output=capture_output,
         text=text,
         input=input,
@@ -207,7 +224,7 @@ def _resolve_latest_remote_path(source: RemoteSource) -> Optional[str]:
         return None
     escaped = " ".join(_escape_remote(pattern) for pattern in patterns)
     result = _retry_remote_call(
-        lambda: _run_remote(source, ["--", "sh", "-lc", f"ls -t {escaped} 2>/dev/null | head -n 1"]),
+        lambda: _run_remote(source, ["--", "sh", "-c", f"ls -t {escaped} 2>/dev/null | head -n 1"]),
         should_retry=lambda outcome: outcome.returncode != 0 or not (outcome.stdout or "").strip(),
     )
     if result.returncode != 0:
@@ -218,7 +235,7 @@ def _resolve_latest_remote_path(source: RemoteSource) -> Optional[str]:
 
 def _resolve_remote_home(source: RemoteSource) -> Optional[str]:
     result = _retry_remote_call(
-        lambda: _run_remote(source, ["--", "sh", "-lc", 'printf "%s" "$HOME"']),
+        lambda: _run_remote(source, ["--", "sh", "-c", 'printf "%s" "$HOME"']),
         should_retry=lambda outcome: outcome.returncode != 0 or not (outcome.stdout or "").strip(),
     )
     if result.returncode != 0:
@@ -232,6 +249,8 @@ def _capture_helper_script(capture_dir: str) -> str:
     return f"""#!/usr/bin/env bash
 set -euo pipefail
 
+PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${{PATH:-}}"
+export PATH
 CAPTURE_DIR={quoted_capture_dir}
 PRIVILEGED_RUNNER="/usr/local/bin/wifi-pipeline-capture-privileged"
 INTERFACE=""
@@ -353,6 +372,8 @@ def _privileged_capture_runner_script(capture_dir: str) -> str:
     return f"""#!/usr/bin/env bash
 set -euo pipefail
 
+PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${{PATH:-}}"
+export PATH
 CAPTURE_DIR={quoted_capture_dir}
 INTERFACE=""
 DURATION="60"
@@ -436,6 +457,13 @@ set -euo pipefail
 
 REMOTE_ROOT={quoted_remote_root}
 CAPTURE_DIR={quoted_capture_dir}
+HOME="${{HOME:-$(getent passwd "$(id -un)" 2>/dev/null | cut -d: -f6)}}"
+if [[ -z "$HOME" ]]; then
+    HOME="$(cd "$REMOTE_ROOT/.." 2>/dev/null && pwd -P || printf '%s' "$REMOTE_ROOT")"
+fi
+export HOME
+PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${{PATH:-}}"
+export PATH
 STATE_DIR="$REMOTE_ROOT/state"
 PID_FILE="$STATE_DIR/capture-service.pid"
 META_FILE="$STATE_DIR/capture-service.env"
@@ -818,6 +846,13 @@ PROTOCOL="{REMOTE_AGENT_PROTOCOL}"
 VERSION="{__version__}"
 REMOTE_ROOT={quoted_remote_root}
 CAPTURE_DIR={quoted_capture_dir}
+HOME="${{HOME:-$(getent passwd "$(id -un)" 2>/dev/null | cut -d: -f6)}}"
+if [[ -z "$HOME" ]]; then
+    HOME="$(cd "$REMOTE_ROOT/.." 2>/dev/null && pwd -P || printf '%s' "$REMOTE_ROOT")"
+fi
+export HOME
+PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${{PATH:-}}"
+export PATH
 STATE_DIR="$REMOTE_ROOT/state"
 LOCAL_BIN="$HOME/.local/bin"
 LOCAL_HELPER="$LOCAL_BIN/wifi-pipeline-capture"
@@ -827,7 +862,13 @@ SERVICE="$REMOTE_ROOT/bin/wifi-pipeline-service"
 PRIVILEGED_RUNNER="/usr/local/bin/wifi-pipeline-capture-privileged"
 
 json_escape() {{
-    printf '%s' "$1" | sed ':a;N;$!ba;s/\\/\\\\/g;s/"/\\"/g;s/\t/\\\\t/g;s/\r/\\\\r/g;s/\n/\\\\n/g'
+    local value="$1"
+    value="${{value//\\\\/\\\\\\\\}}"
+    value="${{value//\\\"/\\\\\\\"}}"
+    value="${{value//$'\\t'/\\\\t}}"
+    value="${{value//$'\\r'/\\\\r}}"
+    value="${{value//$'\\n'/\\\\n}}"
+    printf '%s' "$value"
 }}
 
 yes_no() {{
@@ -974,6 +1015,7 @@ run_doctor() {{
     data_file="$(mktemp)"
     status_file="$(mktemp)"
     printf 'tcpdump=%s\\n' "$(yes_no "$([[ -n "$(command -v tcpdump 2>/dev/null)" ]] && printf 0 || printf 1)")" > "$data_file"
+    printf 'iw=%s\\n' "$(yes_no "$([[ -n "$(command -v iw 2>/dev/null)" ]] && printf 0 || printf 1)")" >> "$data_file"
     printf 'helper=%s\\n' "$(yes_no "$([[ -x "$helper_path" ]] && printf 0 || printf 1)")" >> "$data_file"
     printf 'helper_path=%s\\n' "$helper_path" >> "$data_file"
     printf 'service=%s\\n' "$(yes_no "$([[ -x "$service_path" ]] && printf 0 || printf 1)")" >> "$data_file"
@@ -1198,17 +1240,17 @@ install_packages() {
 
     if command -v apt-get >/dev/null 2>&1; then
         $SUDO env DEBIAN_FRONTEND=noninteractive apt-get update -qq
-        $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y tcpdump >/dev/null
+        $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y tcpdump iw >/dev/null
     elif command -v dnf >/dev/null 2>&1; then
-        $SUDO dnf install -y tcpdump >/dev/null
+        $SUDO dnf install -y tcpdump iw >/dev/null
     elif command -v yum >/dev/null 2>&1; then
-        $SUDO yum install -y tcpdump >/dev/null
+        $SUDO yum install -y tcpdump iw >/dev/null
     elif command -v pacman >/dev/null 2>&1; then
-        $SUDO pacman -Sy --noconfirm tcpdump >/dev/null
+        $SUDO pacman -Sy --noconfirm tcpdump iw >/dev/null
     elif command -v zypper >/dev/null 2>&1; then
-        $SUDO zypper --non-interactive install tcpdump >/dev/null
+        $SUDO zypper --non-interactive install tcpdump iw >/dev/null
     elif command -v apk >/dev/null 2>&1; then
-        $SUDO apk add tcpdump >/dev/null
+        $SUDO apk add tcpdump iw >/dev/null
     elif command -v brew >/dev/null 2>&1; then
         brew install tcpdump >/dev/null
     else
@@ -1302,7 +1344,7 @@ AGENT="$BIN_DIR/wifi-pipeline-agent"
 HEALTH_SCRIPT="$BIN_DIR/wifi-pipeline-health-http"
 APPLIANCE_ENV="$STATE_DIR/appliance.env"
 HEALTH_PORT={quoted_health_port}
-HEALTH_SERVICE_NAME="wifi-pipeline-health.service"
+HEALTH_SERVICE_NAME="wifi-pipeline-health@.service"
 HEALTH_SOCKET_NAME="wifi-pipeline-health.socket"
 APPLIANCE_SERVICE_NAME="wifi-pipeline-appliance.service"
 SYSTEMD_DIR="/etc/systemd/system"
@@ -1375,7 +1417,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/bin/sh $HEALTH_SCRIPT
+ExecStart=$HEALTH_SCRIPT
 StandardInput=socket
 StandardOutput=socket
 Restart=no
@@ -1390,7 +1432,7 @@ Description=WiFi Pipeline Health Endpoint Socket
 
 [Socket]
 ListenStream=$HEALTH_PORT
-Accept=no
+Accept=yes
 NoDelay=true
 
 [Install]
@@ -1405,7 +1447,7 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/bin/sh -lc 'mkdir -p {shlex.quote(remote_root)}/captures {shlex.quote(remote_root)}/state && {shlex.quote(remote_root)}/bin/wifi-pipeline-agent doctor >/dev/null'
+ExecStart=/bin/sh -c 'mkdir -p {shlex.quote(remote_root)}/captures {shlex.quote(remote_root)}/state && {shlex.quote(remote_root)}/bin/wifi-pipeline-agent doctor >/dev/null'
 RemainAfterExit=yes
 
 [Install]
@@ -1413,6 +1455,7 @@ WantedBy=multi-user.target
 EOF_APPLIANCE
 
 $SUDO systemctl daemon-reload
+$SUDO systemctl reset-failed "$APPLIANCE_SERVICE_NAME" "$HEALTH_SERVICE_NAME" "$HEALTH_SOCKET_NAME" >/dev/null 2>&1 || true
 $SUDO systemctl enable --now "$APPLIANCE_SERVICE_NAME" >/dev/null
 $SUDO systemctl enable --now "$HEALTH_SOCKET_NAME" >/dev/null
 
@@ -1506,7 +1549,7 @@ def _install_remote_bundle(
         'cd "$TMP_DIR"; '
         './install.sh'
     )
-    extract_result = _run_remote(source, ["--", "sh", "-lc", extract_script])
+    extract_result = _run_remote(source, ["--", "sh", "-c", extract_script])
     if extract_result.returncode != 0:
         err((extract_result.stderr or extract_result.stdout or "remote bundle install failed").strip())
         return None
@@ -1699,7 +1742,7 @@ def _run_remote_agent(
     remote_home: str,
     *args: object,
 ) -> Dict[str, object]:
-    result = _run_remote(source, ["--", "sh", "-lc", _build_remote_agent_command(remote_home, *args)])
+    result = _run_remote(source, ["--", "sh", "-c", _build_remote_agent_command(remote_home, *args)])
     stdout = (result.stdout or "").strip()
     payload: Dict[str, object]
     if stdout:
@@ -1900,7 +1943,7 @@ def _remote_artifact_info(
         'printf "remote_size_bytes=%s\\n" "$(wc -c < "$FILE" | tr -d \' \')"'
     )
     result = _retry_remote_call(
-        lambda: _run_remote(source, ["--", "sh", "-lc", script]),
+        lambda: _run_remote(source, ["--", "sh", "-c", script]),
         should_retry=lambda outcome: outcome.returncode != 0,
     )
     if result.returncode != 0:
@@ -1941,7 +1984,7 @@ def _run_remote_service_action(
         [
             "--",
             "sh",
-            "-lc",
+            "-c",
             _remote_service_command(
                 remote_home=remote_home,
                 action=action,
@@ -2242,7 +2285,7 @@ def pair_remote_host(
     install_result = _retry_remote_call(
         lambda: _run_remote(
             source,
-            ["--", "sh", "-lc", _authorized_keys_script(key_text)],
+            ["--", "sh", "-c", _authorized_keys_script(key_text)],
             capture_output=False,
             text=False,
         ),
@@ -2586,6 +2629,7 @@ def doctor_remote_host(
             "reachable": False,
             "home": "",
             "tcpdump": False,
+            "iw": False,
             "agent": False,
             "agent_path": "",
             "agent_protocol": "",
@@ -2672,6 +2716,7 @@ def doctor_remote_host(
         '[ -x "$HELPER_LOCAL" ] && HELPER="$HELPER_LOCAL"',
         '[ -x "$SERVICE_LOCAL" ] && SERVICE="$SERVICE_LOCAL"',
         'if command -v tcpdump >/dev/null 2>&1; then echo "tcpdump=yes"; else echo "tcpdump=no"; fi',
+        'if command -v iw >/dev/null 2>&1; then echo "iw=yes"; else echo "iw=no"; fi',
         'if [ -x "$HELPER" ]; then echo "helper=yes"; else echo "helper=no"; fi',
         'echo "helper_path=$HELPER"',
         'if [ -x "$SERVICE" ]; then echo "service=yes"; else echo "service=no"; fi',
@@ -2738,6 +2783,7 @@ def doctor_remote_host(
         remote["health_socket_enabled"] = True if socket_enabled == "yes" else False if socket_enabled == "no" else None
         remote["health_socket_active"] = True if socket_active == "yes" else False if socket_active == "no" else None
         remote["tcpdump"] = parsed.get("tcpdump") == "yes"
+        remote["iw"] = parsed.get("iw") == "yes"
         remote["helper"] = parsed.get("helper") == "yes"
         remote["helper_path"] = parsed.get("helper_path") or helper_path
         remote["helper_version"] = parsed.get("helper_version") or ""
@@ -2773,10 +2819,11 @@ def doctor_remote_host(
             else:
                 remote["interface_exists"] = None
     else:
-        diag = _run_remote(source, ["--", "sh", "-lc", "; ".join(diag_parts)])
+        diag = _run_remote(source, ["--", "sh", "-c", "; ".join(diag_parts)])
         if diag.returncode == 0:
             parsed = _parse_key_value_output(diag.stdout or "")
             remote["tcpdump"] = parsed.get("tcpdump") == "yes"
+            remote["iw"] = parsed.get("iw") == "yes"
             remote["helper"] = parsed.get("helper") == "yes"
             remote["helper_path"] = parsed.get("helper_path") or helper_path
             remote["service"] = parsed.get("service") == "yes"

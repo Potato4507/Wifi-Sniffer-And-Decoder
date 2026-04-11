@@ -18,8 +18,45 @@ def _shorten(value: object, width: int = 96) -> str:
     return text[: width - 3] + "..."
 
 
+def _as_list(value: object) -> list:
+    if value is None or (isinstance(value, str) and value == ""):
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, tuple):
+        return list(value)
+    return [value]
+
+
+def _as_dict(value: object) -> Dict[str, object]:
+    return dict(value) if isinstance(value, dict) else {}
+
+
+def _dict_items(value: object) -> list[Dict[str, object]]:
+    items: list[Dict[str, object]] = []
+    for item in _as_list(value):
+        item_dict = _as_dict(item)
+        if item_dict:
+            items.append(item_dict)
+    return items
+
+
+def _first_text(value: object, default: str = "(none)") -> str:
+    for item in _as_list(value):
+        text = str(item or "").strip()
+        if text:
+            return text
+    return default
+
+
+def _log_field(entry: object, name: str, default: object = "") -> object:
+    if isinstance(entry, dict):
+        return entry.get(name, default)
+    return getattr(entry, name, default)
+
+
 def _render_note_list(items: object, *, empty: str, css_class: str = "muted") -> str:
-    values = [str(item or "").strip() for item in list(items or []) if str(item or "").strip()]
+    values = [str(item or "").strip() for item in _as_list(items) if str(item or "").strip()]
     if not values:
         return f"<p class='{css_class}'>{_html_text(empty)}</p>"
     rows = "".join(f"<li>{_html_text(_shorten(value, 140))}</li>" for value in values)
@@ -33,88 +70,190 @@ def _render_machine_line(label: str, value: object) -> str:
     return f"<p class='muted'>{_html_text(label)}: {_html_text(_shorten(text, 140))}</p>"
 
 
+def _render_requirement_rows(requirements: object) -> str:
+    rows = []
+    for requirement in _as_list(requirements)[:6]:
+        item = _as_dict(requirement)
+        status = str(item.get("status") or "blocked")
+        rows.append(
+            "<div class='requirement'>"
+            f"<span class='pill {status_pill_class(status)}'>{_html_text(status)}</span>"
+            "<div>"
+            f"<strong>{_html_text(item.get('label'))}</strong>"
+            f"<code>{_html_text(_shorten(item.get('value'), 72))}</code>"
+            f"<p class='muted'>{_html_text(_shorten(item.get('detail'), 110))}</p>"
+            "</div>"
+            "</div>"
+        )
+    return "".join(rows) or "<p class='muted'>No requirements listed.</p>"
+
+
+def _render_tool_cards(tools: object) -> str:
+    cards = []
+    for tool in _as_list(tools):
+        item = _as_dict(tool)
+        if not item:
+            continue
+        status = str(item.get("status") or "blocked")
+        action = str(item.get("action") or "").strip()
+        action_line = f"<p class='muted'>Action: <code>{_html_text(action)}</code></p>" if action else ""
+        cards.append(
+            "<article class='tool-card'>"
+            "<header>"
+            "<div>"
+            f"<strong>{_html_text(item.get('label'))}</strong>"
+            f"<p class='muted'>{_html_text(item.get('category') or 'Tool')}</p>"
+            "</div>"
+            f"<span class='pill {status_pill_class(status)}'>{_html_text(status)}</span>"
+            "</header>"
+            f"<p>{_html_text(_shorten(item.get('summary'), 150))}</p>"
+            f"{_render_requirement_rows(item.get('requirements'))}"
+            f"{action_line}"
+            f"<p class='muted'>Next: {_html_text(_shorten(item.get('next_step'), 140))}</p>"
+            "</article>"
+        )
+    return "".join(cards) or "<p class='muted'>No tool catalog is available yet.</p>"
+
+
+def _render_device_cards(devices: object) -> str:
+    cards = []
+    for device in _as_list(devices):
+        item = _as_dict(device)
+        if not item:
+            continue
+        status = str(item.get("status") or "blocked")
+        details = _render_note_list(item.get("details"), empty="No extra device details are available.")
+        cards.append(
+            "<article class='device-card'>"
+            "<header>"
+            "<div>"
+            f"<strong>{_html_text(item.get('name'))}</strong>"
+            f"<p class='muted'>{_html_text(item.get('scope'))}</p>"
+            "</div>"
+            f"<span class='pill {status_pill_class(status)}'>{_html_text(status)}</span>"
+            "</header>"
+            f"<p>{_html_text(item.get('role'))}</p>"
+            f"<p class='muted'>{_html_text(_shorten(item.get('summary'), 140))}</p>"
+            f"{details}"
+            "</article>"
+        )
+    return "".join(cards) or "<p class='muted'>No devices are available yet.</p>"
+
+
 def render_dashboard_html(snapshot: Dict[str, object], *, capture_path: str) -> str:
-    config = dict(snapshot.get("config") or {})
-    bundle = dict(snapshot.get("bundle") or {})
-    detection = dict(bundle.get("detection") or {})
-    analysis = dict(bundle.get("analysis") or {})
-    status_bundle = dict(bundle.get("status_bundle") or {})
-    candidate_rows = list(bundle.get("candidate_rows") or [])
-    corpus_entries = list(bundle.get("corpus_entries") or [])
-    corpus_status = dict(bundle.get("corpus_status") or {})
-    logs = list(snapshot.get("logs") or [])
-    interfaces = list(bundle.get("interfaces") or [])
-    artifacts = list(bundle.get("artifacts") or [])
-    workflow_rows = list(status_bundle.get("workflow") or [])
-    machine_summary = dict(status_bundle.get("machine_summary") or {})
-    machine_items = list(machine_summary.get("items") or [])
-    selection_status = dict(status_bundle.get("selection") or {})
-    replay_status = dict(status_bundle.get("replay") or {})
-    wpa_status = dict(status_bundle.get("wpa") or {})
+    config = _as_dict(snapshot.get("config"))
+    bundle = _as_dict(snapshot.get("bundle"))
+    detection = _as_dict(bundle.get("detection"))
+    analysis = _as_dict(bundle.get("analysis"))
+    status_bundle = _as_dict(bundle.get("status_bundle"))
+    candidate_rows = _as_list(bundle.get("candidate_rows"))
+    corpus_entries = _as_list(bundle.get("corpus_entries"))
+    corpus_status = _as_dict(bundle.get("corpus_status"))
+    logs = _as_list(snapshot.get("logs"))
+    interfaces = _as_list(bundle.get("interfaces"))
+    artifacts = _as_list(bundle.get("artifacts"))
+    workflow_rows = _as_list(status_bundle.get("workflow"))
+    machine_summary = _as_dict(status_bundle.get("machine_summary"))
+    machine_items = _as_list(machine_summary.get("items"))
+    operator_inventory = _as_dict(bundle.get("operator_inventory"))
+    selection_status = _as_dict(status_bundle.get("selection"))
+    replay_status = _as_dict(status_bundle.get("replay"))
+    wpa_status = _as_dict(status_bundle.get("wpa"))
     busy = bool(snapshot.get("busy"))
     current_action = str(snapshot.get("current_action") or "")
     last_message = str(snapshot.get("last_message") or "")
     last_status = str(snapshot.get("last_status") or "idle")
-    selected = dict(detection.get("selected_candidate_stream") or {})
-    selected_analysis = dict(analysis.get("selected_candidate_stream") or {})
-    analysis_corpus = dict(analysis.get("corpus") or {})
-    best_match = dict(analysis_corpus.get("best_match") or {})
-    replay_confidence = dict(replay_status.get("confidence") or {})
+    selected = _as_dict(detection.get("selected_candidate_stream"))
+    selected_analysis = _as_dict(analysis.get("selected_candidate_stream"))
+    analysis_corpus = _as_dict(analysis.get("corpus"))
+    best_match = _as_dict(analysis_corpus.get("best_match"))
+    replay_confidence = _as_dict(replay_status.get("confidence"))
 
-    workflow_cards_html = "".join(
-        (
+    workflow_cards = []
+    for row in _dict_items(workflow_rows):
+        status = str(row.get("status") or "blocked")
+        reasons = _render_note_list(row.get("reasons"), empty="", css_class="muted") if _as_list(row.get("reasons")) else ""
+        next_steps = (
+            _render_note_list(row.get("next_steps"), empty="", css_class="muted")
+            if _as_list(row.get("next_steps"))
+            else ""
+        )
+        workflow_cards.append(
             "<article class='status-card'>"
             f"<header><strong>{_html_text(row.get('area'))}</strong> "
-            f"<span class='pill {status_pill_class(str(row.get('status') or 'blocked'))}'>{_html_text(row.get('status') or 'blocked')}</span></header>"
+            f"<span class='pill {status_pill_class(status)}'>{_html_text(status)}</span></header>"
             f"<p>{_html_text(row.get('summary') or row.get('detail') or '')}</p>"
-            f"{_render_note_list(row.get('reasons'), empty='', css_class='muted') if list(row.get('reasons') or []) else ''}"
-            f"{_render_note_list(row.get('next_steps'), empty='', css_class='muted') if list(row.get('next_steps') or []) else ''}"
+            f"{reasons}"
+            f"{next_steps}"
             "</article>"
         )
-        for row in workflow_rows
-    ) or "<p class='muted'>No capability rows are available yet.</p>"
+    workflow_cards_html = "".join(workflow_cards) or "<p class='muted'>No capability rows are available yet.</p>"
 
-    machine_cards_html = "".join(
-        (
+    machine_cards = []
+    for item in _dict_items(machine_items):
+        status = str(item.get("status") or "blocked")
+        machine_cards.append(
             "<article class='status-card'>"
             f"<header><strong>{_html_text(item.get('label'))}</strong> "
-            f"<span class='pill {status_pill_class(str(item.get('status') or 'blocked'))}'>{_html_text(item.get('status') or 'blocked')}</span></header>"
+            f"<span class='pill {status_pill_class(status)}'>{_html_text(status)}</span></header>"
             f"<p>{_html_text(item.get('summary') or '')}</p>"
             f"{_render_machine_line('Note', item.get('reason'))}"
             f"{_render_machine_line('Next', item.get('next_step'))}"
             "</article>"
         )
-        for item in machine_items
-    ) or "<p class='muted'>No machine summary is available yet.</p>"
+    machine_cards_html = "".join(machine_cards) or "<p class='muted'>No machine summary is available yet.</p>"
+
+    tool_cards_html = _render_tool_cards(operator_inventory.get("tools"))
+    device_cards_html = _render_device_cards(operator_inventory.get("devices"))
 
     log_blocks = []
     for entry in reversed(logs[-6:]):
-        timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(entry.timestamp))
+        if not isinstance(entry, dict) and not any(
+            hasattr(entry, name) for name in ("timestamp", "action", "status", "message", "output")
+        ):
+            continue
+        raw_timestamp = _log_field(entry, "timestamp", time.time())
+        try:
+            timestamp_value = float(raw_timestamp)
+        except (TypeError, ValueError):
+            timestamp_value = time.time()
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(timestamp_value))
+        status = str(_log_field(entry, "status", "unknown") or "unknown")
+        action = str(_log_field(entry, "action", "unknown") or "unknown")
+        message = str(_log_field(entry, "message", "") or "")
+        output = str(_log_field(entry, "output", "") or "")
         log_blocks.append(
             f"<article class='log-card'>"
-            f"<header><strong>{_html_text(timestamp)}</strong> <span class='pill {entry.status}'>{_html_text(entry.status)}</span> "
-            f"<span class='muted'>{_html_text(entry.action)}</span></header>"
-            f"<p>{_html_text(entry.message)}</p>"
-            f"<pre>{_html_text(entry.output.strip() or '(no terminal output)')}</pre>"
+            f"<header><strong>{_html_text(timestamp)}</strong> <span class='pill {status_pill_class(status)}'>{_html_text(status)}</span> "
+            f"<span class='muted'>{_html_text(action)}</span></header>"
+            f"<p>{_html_text(message)}</p>"
+            f"<pre>{_html_text(output.strip() or '(no terminal output)')}</pre>"
             f"</article>"
         )
 
-    interface_options = [
-        f"<option value='{_html_text(name)}'>{_html_text(description or name)}</option>"
-        for _number, name, description in interfaces
-    ]
+    interface_options = []
+    for item in interfaces:
+        try:
+            _number, name, description = item
+        except (TypeError, ValueError):
+            continue
+        interface_options.append(
+            f"<option value='{_html_text(name)}'>{_html_text(description or name)}</option>"
+        )
 
-    artifact_cards = "".join(
-        (
+    artifact_rows = []
+    for item in _dict_items(artifacts):
+        exists = bool(item.get("exists"))
+        artifact_rows.append(
             "<div class='artifact'>"
-            f"<strong>{_html_text(item['label'])}</strong>"
-            f"<span class='pill {'ok' if item['exists'] else 'missing'}'>{'ready' if item['exists'] else 'missing'}</span>"
-            f"<code>{_html_text(_shorten(item['path'], 88))}</code>"
+            f"<strong>{_html_text(item.get('label') or 'Artifact')}</strong>"
+            f"<span class='pill {'ok' if exists else 'missing'}'>{'ready' if exists else 'missing'}</span>"
+            f"<code>{_html_text(_shorten(item.get('path'), 88))}</code>"
             "</div>"
         )
-        for item in artifacts
-    )
+    artifact_cards = "".join(artifact_rows)
 
+    candidate_rows = _dict_items(candidate_rows)
     candidate_rows_html = "".join(
         (
             "<tr>"
@@ -138,8 +277,12 @@ def render_dashboard_html(snapshot: Dict[str, object], *, capture_path: str) -> 
             f"<td>{_html_text(_shorten(entry.get('stream_id'), 60))}</td>"
             "</tr>"
         )
-        for entry in corpus_entries
+        for entry in _dict_items(corpus_entries)
     ) or "<tr><td colspan='5'>No archived candidates yet.</td></tr>"
+
+    hypotheses = _dict_items(analysis.get("hypotheses"))
+    ciphertext_observations = _as_dict(analysis.get("ciphertext_observations"))
+    latest_corpus_entry = _as_dict(corpus_status.get("latest_entry"))
 
     auto_refresh = "<meta http-equiv='refresh' content='4'>" if busy else ""
     return _dashboard_template(
@@ -154,6 +297,9 @@ def render_dashboard_html(snapshot: Dict[str, object], *, capture_path: str) -> 
         artifact_cards=artifact_cards,
         machine_summary_headline=str(machine_summary.get("headline") or ""),
         machine_cards_html=machine_cards_html,
+        operator_headline=str(operator_inventory.get("headline") or "Tool and device inventory will populate as the dashboard gathers context."),
+        tool_cards_html=tool_cards_html,
+        device_cards_html=device_cards_html,
         candidate_rows_html=candidate_rows_html,
         corpus_rows_html=corpus_rows_html,
         log_blocks="".join(log_blocks) or "<p class='muted'>No actions have been run from the dashboard yet.</p>",
@@ -162,7 +308,7 @@ def render_dashboard_html(snapshot: Dict[str, object], *, capture_path: str) -> 
         video_port=str(config.get("video_port") or ""),
         capture_duration=str(config.get("capture_duration") or ""),
         output_dir=str(config.get("output_dir") or ""),
-        target_macs=",".join(config.get("target_macs", [])),
+        target_macs=",".join(str(item) for item in _as_list(config.get("target_macs"))),
         ap_essid=str(config.get("ap_essid") or ""),
         ap_bssid=str(config.get("ap_bssid") or ""),
         ap_channel=str(config.get("ap_channel") or "6"),
@@ -170,6 +316,16 @@ def render_dashboard_html(snapshot: Dict[str, object], *, capture_path: str) -> 
         wordlist_path=str(config.get("wordlist_path") or ""),
         deauth_count=str(config.get("deauth_count") or "10"),
         wpa_password_env=str(config.get("wpa_password_env") or ""),
+        remote_host=str(config.get("remote_host") or ""),
+        remote_path=str(config.get("remote_path") or ""),
+        remote_port=str(config.get("remote_port") or "22"),
+        remote_identity=str(config.get("remote_identity") or ""),
+        remote_interface=str(config.get("remote_interface") or ""),
+        remote_install_mode=str(config.get("remote_install_mode") or "auto"),
+        remote_install_profile=str(config.get("remote_install_profile") or "appliance"),
+        remote_health_port=str(config.get("remote_health_port") or "8741"),
+        remote_dest_dir=str(config.get("remote_dest_dir") or ""),
+        remote_poll_interval=str(config.get("remote_poll_interval") or "8"),
         custom_header_size=str(config.get("custom_header_size") or ""),
         custom_magic_hex=str(config.get("custom_magic_hex") or ""),
         preferred_stream_id=str(config.get("preferred_stream_id") or ""),
@@ -183,17 +339,17 @@ def render_dashboard_html(snapshot: Dict[str, object], *, capture_path: str) -> 
         detection_class=str(selected.get("candidate_class") or "(none)"),
         detection_score=str(selected.get("score") or "?"),
         analysis_stream=_shorten(selected_analysis.get("stream_id") or "(none)", 88),
-        top_hypothesis=str((analysis.get("hypotheses") or [{}])[0].get("name") if analysis.get("hypotheses") else "(none)"),
+        top_hypothesis=str(hypotheses[0].get("name") if hypotheses else "(none)"),
         best_match_id=str(best_match.get("entry_id") or "(none)"),
         best_match_similarity=str(best_match.get("similarity") or ""),
         corpus_entry_count=str(corpus_status.get("entry_count") or 0),
         corpus_material_count=str(corpus_status.get("candidate_material_count") or 0),
-        corpus_latest=str((corpus_status.get("latest_entry") or {}).get("entry_id") or "(none)"),
+        corpus_latest=str(latest_corpus_entry.get("entry_id") or "(none)"),
         corpus_reused="yes" if analysis_corpus.get("reused_candidate_material") else "no",
         average_entropy=str(detection.get("average_entropy") or "?"),
-        chi_squared=str((analysis.get("ciphertext_observations") or {}).get("chi_squared") or "?"),
+        chi_squared=str(ciphertext_observations.get("chi_squared") or "?"),
         total_units=str(analysis.get("total_units") or 0),
-        recommendation=_shorten((analysis.get("recommendations") or ["(none)"])[0], 90),
+        recommendation=_shorten(_first_text(analysis.get("recommendations")), 90),
         selection_status=str(selection_status.get("status") or "blocked"),
         selection_status_class=status_pill_class(str(selection_status.get("status") or "blocked")),
         selection_summary=_shorten(selection_status.get("summary") or "Run analyze to evaluate replay readiness.", 120),
@@ -205,7 +361,7 @@ def render_dashboard_html(snapshot: Dict[str, object], *, capture_path: str) -> 
             selection_status.get("notes"),
             empty="No blockers or caveats are recorded for the current selection.",
         ),
-        selection_next_step=_shorten((selection_status.get("next_steps") or ["(none)"])[0], 120),
+        selection_next_step=_shorten(_first_text(selection_status.get("next_steps")), 120),
         replay_status=str(replay_status.get("status") or "blocked"),
         replay_status_class=status_pill_class(str(replay_status.get("status") or "blocked")),
         replay_summary=_shorten(replay_status.get("summary") or "Run analyze to evaluate replay readiness.", 120),
@@ -342,6 +498,50 @@ def _dashboard_template(**values: object) -> str:
       gap: 10px;
       align-items: center;
     }}
+    .operator-layout {{
+      display: grid;
+      grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr);
+      gap: 16px;
+      margin-top: 14px;
+    }}
+    .tool-grid, .device-grid {{
+      display: grid;
+      gap: 12px;
+      margin-top: 10px;
+      max-height: 640px;
+      overflow: auto;
+      padding-right: 4px;
+    }}
+    .tool-grid {{
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    }}
+    .tool-card, .device-card {{
+      display: grid;
+      gap: 10px;
+      padding: 14px;
+      border-radius: 16px;
+      background:
+        linear-gradient(160deg, rgba(105,210,176,0.08), transparent 42%),
+        rgba(8, 12, 17, 0.52);
+      border: 1px solid rgba(255,255,255,0.07);
+    }}
+    .tool-card header, .device-card header, .requirement {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: flex-start;
+      justify-content: space-between;
+    }}
+    .requirement {{
+      justify-content: flex-start;
+      padding: 9px;
+      border-radius: 12px;
+      background: rgba(255,255,255,0.035);
+    }}
+    .requirement > div {{
+      min-width: 0;
+      flex: 1 1 180px;
+    }}
     .pill {{
       display: inline-flex;
       align-items: center;
@@ -470,6 +670,9 @@ def _dashboard_template(**values: object) -> str:
       gap: 10px;
       align-items: center;
     }}
+    @media (max-width: 860px) {{
+      .operator-layout {{ grid-template-columns: 1fr; }}
+    }}
   </style>
 </head>
 <body>
@@ -490,6 +693,21 @@ def _dashboard_template(**values: object) -> str:
         <h2>What This Machine Can Do</h2>
         <p class="muted">{val('machine_summary_headline')}</p>
         <div class="status-stack">{values.get('machine_cards_html', '')}</div>
+      </div>
+
+      <div class="panel wide">
+        <h2>Operator Console</h2>
+        <p class="muted">{val('operator_headline')}</p>
+        <div class="operator-layout">
+          <div>
+            <h3>Tool Requirements</h3>
+            <div class="tool-grid">{values.get('tool_cards_html', '')}</div>
+          </div>
+          <div>
+            <h3>Detected Devices</h3>
+            <div class="device-grid">{values.get('device_cards_html', '')}</div>
+          </div>
+        </div>
       </div>
 
       <div class="panel wide">
@@ -538,6 +756,26 @@ def _dashboard_template(**values: object) -> str:
               <button type="submit" name="action" value="monitor">Monitor Capture</button>
               <button type="submit" name="action" value="crack">Crack + Decrypt</button>
               <button type="submit" name="action" value="wifi">Full Wi-Fi Lab Flow</button>
+            </div>
+          </details>
+          <details style="margin-top:12px" open>
+            <summary style="cursor:pointer;color:var(--accent-2)">Raspberry Pi / Remote Appliance</summary>
+            <p class="muted" style="margin:8px 0 12px">Use the Pi for capture-heavy work, then pull the PCAP back here for extraction and analysis. These actions use SSH keys and saved remote config, not stored passwords.</p>
+            <div class="field-grid">
+              <label>Remote Output Override
+                <input type="text" name="remote_output" value="" placeholder="/home/david/wifi-pipeline/captures/manual.pcap" />
+              </label>
+            </div>
+            <div class="button-row">
+              <button type="submit" name="action" value="discover_remote">Discover Pi</button>
+              <button type="submit" name="action" value="remote_doctor">Remote Doctor</button>
+              <button type="submit" name="action" value="bootstrap_remote">Bootstrap Pi</button>
+              <button type="submit" name="action" value="remote_status">Service Status</button>
+              <button type="submit" name="action" value="remote_service_start">Start Service</button>
+              <button type="submit" name="action" value="remote_stop">Stop Service</button>
+              <button type="submit" name="action" value="remote_last_capture">Last Capture</button>
+              <button type="submit" name="action" value="start_remote">Capture + Pull</button>
+              <button type="submit" name="action" value="pull_remote">Pull Existing</button>
             </div>
           </details>
         </form>
@@ -645,6 +883,43 @@ def _dashboard_template(**values: object) -> str:
             </label>
             <label>WPA Password Env
               <input type="text" name="wpa_password_env" value="{val('wpa_password_env')}" />
+            </label>
+            <label>Remote Host
+              <input type="text" name="remote_host" value="{val('remote_host')}" placeholder="david@raspi-sniffer" />
+            </label>
+            <label>Remote SSH Port
+              <input type="number" name="remote_port" value="{val('remote_port')}" />
+            </label>
+            <label>Remote Identity File
+              <input type="text" name="remote_identity" value="{val('remote_identity')}" placeholder="optional ~/.ssh/id_ed25519" />
+            </label>
+            <label>Remote Interface
+              <input type="text" name="remote_interface" value="{val('remote_interface')}" placeholder="wlan0" />
+            </label>
+            <label>Remote Path / Pattern
+              <input type="text" name="remote_path" value="{val('remote_path')}" placeholder="/home/david/wifi-pipeline/captures/" />
+            </label>
+            <label>Remote Import Directory
+              <input type="text" name="remote_dest_dir" value="{val('remote_dest_dir')}" />
+            </label>
+            <label>Remote Health Port
+              <input type="number" name="remote_health_port" value="{val('remote_health_port')}" />
+            </label>
+            <label>Remote Poll Interval
+              <input type="number" name="remote_poll_interval" value="{val('remote_poll_interval')}" />
+            </label>
+            <label>Remote Install Mode
+              <select name="remote_install_mode">
+                <option value="auto" {"selected" if values.get("remote_install_mode") == "auto" else ""}>auto</option>
+                <option value="native" {"selected" if values.get("remote_install_mode") == "native" else ""}>native</option>
+                <option value="bundle" {"selected" if values.get("remote_install_mode") == "bundle" else ""}>bundle</option>
+              </select>
+            </label>
+            <label>Remote Install Profile
+              <select name="remote_install_profile">
+                <option value="appliance" {"selected" if values.get("remote_install_profile") == "appliance" else ""}>appliance</option>
+                <option value="standard" {"selected" if values.get("remote_install_profile") == "standard" else ""}>standard</option>
+              </select>
             </label>
             <label>Header Strip Bytes
               <input type="number" name="custom_header_size" value="{val('custom_header_size')}" />

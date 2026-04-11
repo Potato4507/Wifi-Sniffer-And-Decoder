@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from wifi_pipeline import cli
+from wifi_pipeline.secure_mesh import MeshDiscoveryRecord, MeshRegistry, MeshTransportHint
 
 
 @pytest.mark.parametrize(
@@ -79,7 +80,20 @@ def test_build_parser_parses_discover_remote_arguments() -> None:
     parser = cli.build_parser()
 
     args = parser.parse_args(
-        ["discover-remote", "--network", "192.168.1.0/24", "--health-port", "9001", "--timeout", "0.5", "--max-hosts", "20"]
+        [
+            "discover-remote",
+            "--network",
+            "192.168.1.0/24",
+            "--health-port",
+            "9001",
+            "--timeout",
+            "0.5",
+            "--max-hosts",
+            "20",
+            "--save",
+            "--select",
+            "2",
+        ]
     )
 
     assert args.command == "discover-remote"
@@ -87,6 +101,597 @@ def test_build_parser_parses_discover_remote_arguments() -> None:
     assert args.health_port == 9001
     assert args.timeout == 0.5
     assert args.max_hosts == 20
+    assert args.save is True
+    assert args.select == 2
+
+
+def test_build_parser_parses_mesh_add_device_arguments() -> None:
+    parser = cli.build_parser()
+
+    args = parser.parse_args(
+        [
+            "mesh",
+            "add-device",
+            "--device-id",
+            "raspi-sniffer",
+            "--role",
+            "capture_appliance",
+            "--identity-key",
+            "identity-public",
+            "--encryption-key",
+            "encryption-public",
+            "--action",
+            "capture.artifact.send",
+            "--tunnel-ip",
+            "10.77.0.2/32",
+            "--replace",
+        ]
+    )
+
+    assert args.command == "mesh"
+    assert args.mesh_command == "add-device"
+    assert args.device_id == "raspi-sniffer"
+    assert args.role == "capture_appliance"
+    assert args.action == ["capture.artifact.send"]
+    assert args.tunnel_ip == "10.77.0.2/32"
+    assert args.replace is True
+
+
+def test_build_parser_parses_mesh_identity_and_bundle_arguments() -> None:
+    parser = cli.build_parser()
+
+    identity_args = parser.parse_args(
+        ["mesh", "init-identity", "--device-id", "controller", "--role", "controller", "--overwrite"]
+    )
+    export_args = parser.parse_args(
+        ["mesh", "export-bundle", "--device-id", "controller", "--out", "controller.bundle.json"]
+    )
+    import_args = parser.parse_args(
+        ["mesh", "import-bundle", "--path", "controller.bundle.json", "--trust-fingerprint", "ABCD"]
+    )
+    token_args = parser.parse_args(["mesh", "issue-token", "--device-id", "controller"])
+    approval_args = parser.parse_args(["mesh", "approval-code"])
+    wg_init_args = parser.parse_args(
+        ["mesh", "wg-init", "--device-id", "controller", "--address", "10.77.0.1/24", "--endpoint", "host:51820"]
+    )
+    wg_render_args = parser.parse_args(
+        ["mesh", "wg-render", "--device-id", "controller", "--peer", "raspi-sniffer", "--out", "wg.conf"]
+    )
+    discover_args = parser.parse_args(
+        [
+            "mesh",
+            "discover",
+            "--network",
+            "192.168.1.0/24",
+            "--no-probe",
+            "--hint",
+            "bluetooth=AA:BB",
+            "--hint-device",
+            "raspi-sniffer",
+            "--hints-file",
+            "mesh-hints.json",
+            "--json",
+        ]
+    )
+    paths_args = parser.parse_args(
+        ["mesh", "paths", "--device", "controller", "--hint", "serial=COM4", "--hints-file", "mesh-hints.json", "--json"]
+    )
+    route_args = parser.parse_args(
+        [
+            "mesh",
+            "route-plan",
+            "--device",
+            "raspi-sniffer",
+            "--no-probe",
+            "--hint",
+            "serial=COM4",
+            "--transport",
+            "serial",
+            "--allow-untrusted-route",
+            "--json",
+        ]
+    )
+    seal_args = parser.parse_args(
+        [
+            "mesh",
+            "seal-command",
+            "--sender",
+            "controller",
+            "--receiver",
+            "raspi-sniffer",
+            "--command",
+            "capture.start",
+            "--body",
+            '{"duration":5}',
+            "--counter",
+            "7",
+            "--ttl",
+            "30",
+            "--approval-code",
+            "code-123",
+            "--require-approval",
+            "--approval-ttl",
+            "120",
+            "--out",
+            "command.envelope.json",
+        ]
+    )
+    prepare_args = parser.parse_args(
+        [
+            "mesh",
+            "prepare-command",
+            "--sender",
+            "controller",
+            "--receiver",
+            "raspi-sniffer",
+            "--command",
+            "capture.start",
+            "--body",
+            '{"duration":5}',
+            "--counter",
+            "8",
+            "--no-probe",
+            "--hint",
+            "serial=COM4",
+            "--transport",
+            "serial",
+            "--out",
+            "prepared.envelope.json",
+            "--bundle-out",
+            "prepared.bundle.json",
+            "--json",
+        ]
+    )
+    open_args = parser.parse_args(
+        [
+            "mesh",
+            "open-command",
+            "--receiver",
+            "raspi-sniffer",
+            "--envelope",
+            "command.envelope.json",
+            "--replay-cache",
+            "replay.json",
+            "--approval-code",
+            "code-123",
+            "--require-approval",
+            "--json",
+        ]
+    )
+    bundle_create_args = parser.parse_args(
+        [
+            "mesh",
+            "bundle-create",
+            "--envelope",
+            "command.envelope.json",
+            "--envelope",
+            "second.envelope.json",
+            "--out",
+            "commands.bundle.json",
+            "--route-hint",
+            "serial:COM4",
+        ]
+    )
+    bundle_list_args = parser.parse_args(["mesh", "bundle-list", "--bundle", "commands.bundle.json", "--json"])
+
+    assert identity_args.command == "mesh"
+    assert identity_args.mesh_command == "init-identity"
+    assert identity_args.device_id == "controller"
+    assert identity_args.role == "controller"
+    assert identity_args.overwrite is True
+    assert export_args.mesh_command == "export-bundle"
+    assert export_args.out == "controller.bundle.json"
+    assert import_args.mesh_command == "import-bundle"
+    assert import_args.trust_fingerprint == "ABCD"
+    assert token_args.mesh_command == "issue-token"
+    assert approval_args.mesh_command == "approval-code"
+    assert wg_init_args.mesh_command == "wg-init"
+    assert wg_init_args.address == "10.77.0.1/24"
+    assert wg_init_args.endpoint == "host:51820"
+    assert wg_render_args.mesh_command == "wg-render"
+    assert wg_render_args.peer_device_id == "raspi-sniffer"
+    assert wg_render_args.out == "wg.conf"
+    assert discover_args.mesh_command == "discover"
+    assert discover_args.network == ["192.168.1.0/24"]
+    assert discover_args.no_probe is True
+    assert discover_args.hint == ["bluetooth=AA:BB"]
+    assert discover_args.hint_device == "raspi-sniffer"
+    assert discover_args.hints_file == ["mesh-hints.json"]
+    assert discover_args.json is True
+    assert paths_args.mesh_command == "paths"
+    assert paths_args.device_id == "controller"
+    assert paths_args.hint == ["serial=COM4"]
+    assert paths_args.hints_file == ["mesh-hints.json"]
+    assert paths_args.json is True
+    assert route_args.mesh_command == "route-plan"
+    assert route_args.device_id == "raspi-sniffer"
+    assert route_args.transport == ["serial"]
+    assert route_args.allow_untrusted_route is True
+    assert route_args.json is True
+    assert seal_args.mesh_command == "seal-command"
+    assert seal_args.command == "mesh"
+    assert seal_args.sender == "controller"
+    assert seal_args.receiver == "raspi-sniffer"
+    assert seal_args.mesh_action == "capture.start"
+    assert seal_args.counter == 7
+    assert seal_args.ttl == 30
+    assert seal_args.approval_code == "code-123"
+    assert seal_args.require_approval is True
+    assert seal_args.approval_ttl == 120
+    assert prepare_args.mesh_command == "prepare-command"
+    assert prepare_args.command == "mesh"
+    assert prepare_args.mesh_action == "capture.start"
+    assert prepare_args.receiver == "raspi-sniffer"
+    assert prepare_args.bundle_out == "prepared.bundle.json"
+    assert prepare_args.transport == ["serial"]
+    assert open_args.mesh_command == "open-command"
+    assert open_args.receiver == "raspi-sniffer"
+    assert open_args.replay_cache == "replay.json"
+    assert open_args.approval_code == "code-123"
+    assert open_args.require_approval is True
+    assert open_args.json is True
+    assert bundle_create_args.mesh_command == "bundle-create"
+    assert bundle_create_args.envelope == ["command.envelope.json", "second.envelope.json"]
+    assert bundle_create_args.route_hint == "serial:COM4"
+    assert bundle_list_args.mesh_command == "bundle-list"
+    assert bundle_list_args.json is True
+
+
+def test_run_mesh_command_adds_exports_imports_discovers_and_revokes_device(monkeypatch, tmp_path) -> None:
+    registry_path = tmp_path / "devices.json"
+    private_dir = tmp_path / "private"
+    bundle_path = tmp_path / "controller.bundle.json"
+    config = {"secure_mesh_registry_path": str(registry_path), "secure_mesh_private_dir": str(private_dir)}
+    parser = cli.build_parser()
+
+    init_args = parser.parse_args(["mesh", "init"])
+    init_args.config = None
+    assert cli.run_mesh_command(config, init_args) is True
+    assert registry_path.exists()
+
+    identity_args = parser.parse_args(
+        ["mesh", "init-identity", "--device-id", "controller", "--role", "controller"]
+    )
+    identity_args.config = None
+    assert cli.run_mesh_command(config, identity_args) is True
+    controller = MeshRegistry.load(registry_path).get_device("controller")
+    assert controller is not None
+
+    export_args = parser.parse_args(
+        ["mesh", "export-bundle", "--device-id", "controller", "--out", str(bundle_path)]
+    )
+    export_args.config = None
+    assert cli.run_mesh_command(config, export_args) is True
+    assert bundle_path.exists()
+
+    add_args = parser.parse_args(
+        [
+            "mesh",
+            "add-device",
+            "--device-id",
+            "raspi-sniffer",
+            "--role",
+            "capture_appliance",
+            "--identity-key",
+            "identity-public",
+            "--encryption-key",
+            "encryption-public",
+        ]
+    )
+    add_args.config = None
+    assert cli.run_mesh_command(config, add_args) is True
+
+    registry = MeshRegistry.load(registry_path)
+    assert registry.get_device("raspi-sniffer") is not None
+    assert registry.is_authorized("raspi-sniffer", "capture.artifact.send")
+
+    second_registry_path = tmp_path / "second-devices.json"
+    second_config = {"secure_mesh_registry_path": str(second_registry_path)}
+    import_args = parser.parse_args(
+        ["mesh", "import-bundle", "--path", str(bundle_path), "--trust-fingerprint", controller.fingerprint]
+    )
+    import_args.config = None
+    assert cli.run_mesh_command(second_config, import_args) is True
+    assert MeshRegistry.load(second_registry_path).get_device("controller") is not None
+
+    token_args = parser.parse_args(["mesh", "issue-token", "--device-id", "controller"])
+    token_args.config = None
+    assert cli.run_mesh_command(config, token_args) is True
+
+    wg_init_args = parser.parse_args(
+        ["mesh", "wg-init", "--device-id", "controller", "--address", "10.77.0.1/24", "--overwrite"]
+    )
+    wg_init_args.config = None
+    assert cli.run_mesh_command(config, wg_init_args) is True
+
+    wg_out = tmp_path / "wg.conf"
+    monkeypatch.setattr(cli, "render_wireguard_config", lambda *_args, **_kwargs: "[Interface]\nPrivateKey = test\n")
+    wg_render_args = parser.parse_args(
+        ["mesh", "wg-render", "--device-id", "controller", "--peer", "raspi-sniffer", "--out", str(wg_out)]
+    )
+    wg_render_args.config = None
+    assert cli.run_mesh_command(config, wg_render_args) is True
+    assert wg_out.exists()
+
+    monkeypatch.setattr(
+        cli,
+        "discover_mesh_devices",
+        lambda *_args, **_kwargs: [
+            MeshDiscoveryRecord(
+                source="test",
+                device_id_hint="controller",
+                matched_device_id="controller",
+                trusted=True,
+                trust_status="trusted",
+                trust_reason="test",
+                transports=[MeshTransportHint("ssh", "controller.local", status="configured")],
+            )
+        ],
+    )
+    discover_args = parser.parse_args(["mesh", "discover", "--max-hosts", "1"])
+    discover_args.config = None
+    assert cli.run_mesh_command(config, discover_args) is True
+
+    paths_args = parser.parse_args(["mesh", "paths", "--device", "controller"])
+    paths_args.config = None
+    assert cli.run_mesh_command(config, paths_args) is True
+
+    revoke_args = parser.parse_args(["mesh", "revoke", "--device-id", "raspi-sniffer"])
+    revoke_args.config = None
+    assert cli.run_mesh_command(config, revoke_args) is True
+
+    registry = MeshRegistry.load(registry_path)
+    assert not registry.is_authorized("raspi-sniffer", "capture.artifact.send")
+
+
+def test_run_mesh_command_seals_and_opens_command_envelope(tmp_path, capsys) -> None:
+    registry_path = tmp_path / "devices.json"
+    private_dir = tmp_path / "private"
+    replay_cache = tmp_path / "replay_cache.json"
+    envelope_path = tmp_path / "command.envelope.json"
+    config = {
+        "secure_mesh_registry_path": str(registry_path),
+        "secure_mesh_private_dir": str(private_dir),
+        "secure_mesh_replay_cache_path": str(replay_cache),
+    }
+    parser = cli.build_parser()
+
+    for device_id, role in (("controller", "controller"), ("raspi-sniffer", "capture_appliance")):
+        identity_args = parser.parse_args(["mesh", "init-identity", "--device-id", device_id, "--role", role])
+        identity_args.config = None
+        assert cli.run_mesh_command(config, identity_args) is True
+
+    seal_args = parser.parse_args(
+        [
+            "mesh",
+            "seal-command",
+            "--sender",
+            "controller",
+            "--receiver",
+            "raspi-sniffer",
+            "--command",
+            "capture.start",
+            "--body",
+            '{"duration":5,"interface":"wlan0"}',
+            "--counter",
+            "1",
+            "--out",
+            str(envelope_path),
+        ]
+    )
+    seal_args.config = None
+    assert cli.run_mesh_command(config, seal_args) is True
+    assert envelope_path.exists()
+
+    open_args = parser.parse_args(
+        [
+            "mesh",
+            "open-command",
+            "--receiver",
+            "raspi-sniffer",
+            "--envelope",
+            str(envelope_path),
+            "--json",
+        ]
+    )
+    open_args.config = None
+    assert cli.run_mesh_command(config, open_args) is True
+
+    output = capsys.readouterr().out
+    assert '"command": "capture.start"' in output
+    assert '"duration": 5' in output
+    assert replay_cache.exists()
+
+
+def test_run_mesh_command_approval_and_bundle_flow(tmp_path, capsys) -> None:
+    registry_path = tmp_path / "devices.json"
+    private_dir = tmp_path / "private"
+    envelope_path = tmp_path / "approved.envelope.json"
+    bundle_path = tmp_path / "commands.bundle.json"
+    replay_cache = tmp_path / "replay_cache.json"
+    config = {
+        "secure_mesh_registry_path": str(registry_path),
+        "secure_mesh_private_dir": str(private_dir),
+        "secure_mesh_replay_cache_path": str(replay_cache),
+    }
+    parser = cli.build_parser()
+
+    for device_id, role in (("controller", "controller"), ("raspi-sniffer", "capture_appliance")):
+        identity_args = parser.parse_args(["mesh", "init-identity", "--device-id", device_id, "--role", role])
+        identity_args.config = None
+        assert cli.run_mesh_command(config, identity_args) is True
+
+    approval_args = parser.parse_args(["mesh", "approval-code"])
+    approval_args.config = None
+    assert cli.run_mesh_command(config, approval_args) is True
+
+    seal_args = parser.parse_args(
+        [
+            "mesh",
+            "seal-command",
+            "--sender",
+            "controller",
+            "--receiver",
+            "raspi-sniffer",
+            "--command",
+            "capture.start",
+            "--body",
+            '{"duration":8}',
+            "--counter",
+            "1",
+            "--approval-code",
+            "phase8-code",
+            "--require-approval",
+            "--out",
+            str(envelope_path),
+        ]
+    )
+    seal_args.config = None
+    assert cli.run_mesh_command(config, seal_args) is True
+    assert "phase8-code" not in envelope_path.read_text(encoding="utf-8")
+
+    open_args = parser.parse_args(
+        [
+            "mesh",
+            "open-command",
+            "--receiver",
+            "raspi-sniffer",
+            "--envelope",
+            str(envelope_path),
+            "--approval-code",
+            "phase8-code",
+            "--require-approval",
+            "--json",
+        ]
+    )
+    open_args.config = None
+    assert cli.run_mesh_command(config, open_args) is True
+
+    bundle_args = parser.parse_args(
+        ["mesh", "bundle-create", "--envelope", str(envelope_path), "--out", str(bundle_path), "--route-hint", "serial:COM4"]
+    )
+    bundle_args.config = None
+    assert cli.run_mesh_command(config, bundle_args) is True
+    assert bundle_path.exists()
+
+    list_args = parser.parse_args(["mesh", "bundle-list", "--bundle", str(bundle_path), "--json"])
+    list_args.config = None
+    assert cli.run_mesh_command(config, list_args) is True
+
+    output = capsys.readouterr().out
+    assert "One-time operator approval code" in output
+    assert '"command": "capture.start"' in output
+    assert '"duration": 8' in output
+
+
+def test_run_mesh_command_route_plan_and_prepare_command(tmp_path, capsys) -> None:
+    registry_path = tmp_path / "devices.json"
+    private_dir = tmp_path / "private"
+    envelope_path = tmp_path / "prepared.envelope.json"
+    bundle_path = tmp_path / "prepared.bundle.json"
+    untrusted_envelope_path = tmp_path / "untrusted.envelope.json"
+    config = {
+        "secure_mesh_registry_path": str(registry_path),
+        "secure_mesh_private_dir": str(private_dir),
+        "secure_mesh_replay_cache_path": str(tmp_path / "replay_cache.json"),
+    }
+    parser = cli.build_parser()
+
+    for device_id, role in (("controller", "controller"), ("raspi-sniffer", "capture_appliance")):
+        identity_args = parser.parse_args(["mesh", "init-identity", "--device-id", device_id, "--role", role])
+        identity_args.config = None
+        assert cli.run_mesh_command(config, identity_args) is True
+
+    raspi = MeshRegistry.load(registry_path).get_device("raspi-sniffer")
+    assert raspi is not None
+
+    route_args = parser.parse_args(
+        [
+            "mesh",
+            "route-plan",
+            "--device",
+            "raspi-sniffer",
+            "--no-probe",
+            "--hint",
+            "serial=COM4",
+            "--hint-fingerprint",
+            raspi.fingerprint,
+            "--transport",
+            "serial",
+            "--json",
+        ]
+    )
+    route_args.config = None
+    assert cli.run_mesh_command(config, route_args) is True
+
+    prepare_args = parser.parse_args(
+        [
+            "mesh",
+            "prepare-command",
+            "--sender",
+            "controller",
+            "--receiver",
+            "raspi-sniffer",
+            "--command",
+            "capture.start",
+            "--body",
+            '{"duration":11,"interface":"wlan0"}',
+            "--counter",
+            "1",
+            "--no-probe",
+            "--hint",
+            "serial=COM4",
+            "--hint-fingerprint",
+            raspi.fingerprint,
+            "--transport",
+            "serial",
+            "--out",
+            str(envelope_path),
+            "--bundle-out",
+            str(bundle_path),
+            "--json",
+        ]
+    )
+    prepare_args.config = None
+    assert cli.run_mesh_command(config, prepare_args) is True
+
+    output = capsys.readouterr().out
+    assert '"selected": true' in output
+    assert '"type": "serial"' in output
+    assert envelope_path.exists()
+    assert bundle_path.exists()
+    assert "wlan0" not in envelope_path.read_text(encoding="utf-8")
+    assert "wlan0" not in bundle_path.read_text(encoding="utf-8")
+    assert "serial:COM4" in bundle_path.read_text(encoding="utf-8")
+
+    untrusted_prepare_args = parser.parse_args(
+        [
+            "mesh",
+            "prepare-command",
+            "--sender",
+            "controller",
+            "--receiver",
+            "raspi-sniffer",
+            "--command",
+            "capture.start",
+            "--body",
+            '{"duration":11,"interface":"wlan0"}',
+            "--counter",
+            "2",
+            "--no-probe",
+            "--hint",
+            "serial=COM4",
+            "--transport",
+            "serial",
+            "--out",
+            str(untrusted_envelope_path),
+            "--json",
+        ]
+    )
+    untrusted_prepare_args.config = None
+
+    assert cli.run_mesh_command(config, untrusted_prepare_args) is False
+    assert not untrusted_envelope_path.exists()
 
 
 def test_build_parser_parses_bootstrap_remote_arguments() -> None:
@@ -513,6 +1118,7 @@ def test_run_doctor_combines_local_and_remote_checks(monkeypatch) -> None:
                 "health_socket_enabled": True,
                 "appliance_service_enabled": True,
                 "tcpdump": True,
+                "iw": True,
                 "helper": True,
                 "helper_path": "/home/pi/.local/bin/wifi-pipeline-capture",
                 "service": True,
@@ -551,6 +1157,82 @@ def test_run_discover_remote_returns_results(monkeypatch) -> None:
     results = cli.run_discover_remote({}, max_hosts=8)
 
     assert results[0]["ssh_target"] == "pi@192.168.1.10"
+
+
+def test_save_discovered_remote_updates_config_with_selected_node(monkeypatch) -> None:
+    saved: dict[str, object] = {}
+    config = {"remote_port": 22}
+    results = [
+        {
+            "device_name": "pi-one",
+            "host": "192.168.1.10",
+            "ssh_target": "pi@192.168.1.10",
+            "install_profile": "appliance",
+            "health_port": "9001",
+            "capture_dir": "/srv/captures",
+        },
+        {
+            "device_name": "pi-two",
+            "host": "192.168.1.11",
+            "ssh_target": "pi@192.168.1.11",
+            "install_profile": "standard",
+            "health_port": "8741",
+        },
+    ]
+
+    monkeypatch.setattr(
+        cli,
+        "save_config",
+        lambda updated, path=None: saved.update({"config": dict(updated), "path": path}),
+    )
+
+    assert cli._save_discovered_remote(config, results, config_path="lab.custom.json", select_index=1) is True
+    assert saved["path"] == "lab.custom.json"
+    assert saved["config"]["remote_host"] == "pi@192.168.1.10"
+    assert saved["config"]["remote_install_profile"] == "appliance"
+    assert saved["config"]["remote_health_port"] == 9001
+    assert saved["config"]["remote_path"] == "/srv/captures/"
+    assert config["remote_host"] == "pi@192.168.1.10"
+
+
+def test_save_discovered_remote_requires_explicit_selection_for_multiple_nodes(monkeypatch) -> None:
+    class _FakeStdin:
+        def isatty(self) -> bool:
+            return False
+
+    monkeypatch.setattr(cli.sys, "stdin", _FakeStdin())
+    monkeypatch.setattr(cli, "save_config", lambda *_args, **_kwargs: pytest.fail("save_config should not be called"))
+
+    assert (
+        cli._save_discovered_remote(
+            {},
+            [
+                {"host": "192.168.1.10", "ssh_target": "pi@192.168.1.10"},
+                {"host": "192.168.1.11", "ssh_target": "pi@192.168.1.11"},
+            ],
+        )
+        is False
+    )
+
+
+def test_main_discover_remote_save_uses_selected_result(monkeypatch) -> None:
+    monkeypatch.setattr(
+        cli,
+        "load_config",
+        lambda *_args, **_kwargs: {"remote_host": "", "remote_install_profile": "appliance"},
+    )
+    monkeypatch.setattr(cli, "banner", lambda: None)
+    monkeypatch.setattr(cli, "_enforce_command_support", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        cli,
+        "run_discover_remote",
+        lambda *_args, **_kwargs: [
+            {"host": "192.168.1.10", "ssh_target": "pi@192.168.1.10", "install_profile": "appliance", "health_port": "8741"}
+        ],
+    )
+    monkeypatch.setattr(cli, "_save_discovered_remote", lambda *_args, **_kwargs: True)
+
+    assert cli.main(["discover-remote", "--save"]) == 0
 
 
 def test_run_remote_service_calls_remote_helper(monkeypatch) -> None:

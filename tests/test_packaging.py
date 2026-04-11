@@ -50,6 +50,8 @@ def test_project_metadata_points_at_current_repository() -> None:
     assert data["project"]["urls"]["Issues"] == f"{expected_repo}/issues"
     assert data["project"]["urls"]["CI"] == f"{expected_repo}/actions/workflows/ci.yml"
     assert data["project"]["urls"]["Changelog"] == f"{expected_repo}/blob/main/CHANGELOG.md"
+    assert "cryptography>=42" in data["project"]["dependencies"]
+    assert "cryptography>=42" in Path("requirements.txt").read_text(encoding="utf-8")
     assert f"[![CI]({expected_repo}/actions/workflows/ci.yml/badge.svg)]" in readme
 
 
@@ -87,7 +89,10 @@ def test_build_release_script_creates_portable_zip(tmp_path) -> None:
     assert "GETTING_STARTED.md" in members
     assert "RELEASE_CHECKLIST.md" in members
     assert "README.md" in members
+    assert "discover_remote.ps1" in members
+    assert "discover_remote.bat" in members
     assert "docs/PLATFORM_WORKFLOW.md" in members
+    assert "docs/SECURE_DEVICE_MESH.md" in members
     assert "videopipeline.py" in members
     assert "run_local.sh" in members
     assert "setup_local.sh" in members

@@ -548,12 +548,21 @@ def _start_code_positions(data: bytes) -> List[int]:
     return positions
 
 
+def _printable_ascii_ratio(data: bytes) -> float:
+    if not data:
+        return 0.0
+    printable = sum(32 <= byte <= 126 or byte in (9, 10, 13) for byte in data)
+    return printable / len(data)
+
+
 def split_nal_units(data: bytes) -> Tuple[List[bytes], Optional[str]]:
     positions = _start_code_positions(data)
     if len(positions) < 2:
         return [], None
     units: List[bytes] = []
     codec_votes: Dict[str, int] = {"h264": 0, "h265": 0}
+    strong_votes: Dict[str, int] = {"h264": 0, "h265": 0}
+    text_like_units = 0
     for index, start in enumerate(positions):
         end = positions[index + 1] if index + 1 < len(positions) else len(data)
         unit = data[start:end]
@@ -568,11 +577,30 @@ def split_nal_units(data: bytes) -> Tuple[List[bytes], Optional[str]]:
         h265_type = (header >> 1) & 0x3F
         if 1 <= h264_type <= 23:
             codec_votes["h264"] += 1
+            if h264_type in {1, 5, 6, 7, 8, 9}:
+                strong_votes["h264"] += 1
         if 0 < h265_type < 48:
             codec_votes["h265"] += 1
+            if h265_type in {19, 20, 21, 32, 33, 34, 35, 39, 40}:
+                strong_votes["h265"] += 1
+        if _printable_ascii_ratio(unit[prefix + 1 : prefix + 33]) >= 0.85:
+            text_like_units += 1
     if not units:
         return [], None
-    codec = max(codec_votes, key=codec_votes.get) if any(codec_votes.values()) else None
+    ranked = sorted(codec_votes.items(), key=lambda item: item[1], reverse=True)
+    codec = ranked[0][0] if ranked and ranked[0][1] > 0 else None
+    if not codec:
+        return [], None
+    top_votes = ranked[0][1]
+    second_votes = ranked[1][1] if len(ranked) > 1 else 0
+    if top_votes < 2:
+        return [], None
+    if top_votes == second_votes:
+        return [], None
+    if strong_votes.get(codec, 0) == 0 and len(units) < 3:
+        return [], None
+    if text_like_units >= max(1, len(units) // 2):
+        return [], None
     return units, codec
 
 

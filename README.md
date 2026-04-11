@@ -24,7 +24,7 @@ Read [`GETTING_STARTED.md`](GETTING_STARTED.md) for the copy-paste setup guide.
 - Extract TCP and UDP streams and rank likely payload candidates
 - Run protocol-aware heuristic analysis and reconstruction
 - Enrich extracted artifacts with passive metadata, fingerprints, and triage summaries
-- Track artifacts and results in a local web dashboard
+- Track artifacts, tool requirements, detected devices, and remote controls in a local operator dashboard
 - Support Windows-first remote capture through an Ubuntu or Raspberry Pi OS device
 
 ## What this repo promises
@@ -63,6 +63,17 @@ python videopipeline.py hardware
 python videopipeline.py preflight
 python videopipeline.py crack-status
 python videopipeline.py enrich
+python videopipeline.py mesh init
+python videopipeline.py mesh init-identity --device-id controller --role controller
+python videopipeline.py mesh discover --no-probe
+python videopipeline.py mesh discover --hint bluetooth=AA:BB:CC:DD --hint-device raspi-sniffer
+python videopipeline.py mesh route-plan --device raspi-sniffer --transport wireguard
+python videopipeline.py mesh wg-init --device-id controller --address 10.77.0.1/24
+python videopipeline.py mesh approval-code
+python videopipeline.py mesh seal-command --sender controller --receiver raspi-sniffer --command capture.start --counter 1 --out command.envelope.json
+python videopipeline.py mesh prepare-command --sender controller --receiver raspi-sniffer --command capture.start --counter 2 --out command.envelope.json --bundle-out commands.bundle.json
+python videopipeline.py mesh open-command --receiver raspi-sniffer --envelope command.envelope.json --json
+python videopipeline.py mesh bundle-create --envelope command.envelope.json --out commands.bundle.json --route-hint serial:COM4
 python videopipeline.py web
 python videopipeline.py all
 ```
@@ -74,12 +85,22 @@ Use these commands as the capability and readiness path:
 - `preflight`: explains whether the selected pipeline path is supported, limited, or blocked
 - `crack-status`: explains WPA artifact and decrypt readiness instead of guessing
 - `enrich`: adds passive artifact metadata and fingerprints for extracted units
+- `mesh init`: creates the public secure mesh device registry used by the future paired-device encrypted control path
+- `mesh init-identity`: generates this device's local Ed25519/X25519 secure mesh identity keys outside `lab.json`
+- `mesh discover`: finds possible paired devices and connection paths while keeping registry, LAN, hotspot, Bluetooth, serial, radio, and file-fed hints separate from trusted identity
+- `mesh route-plan`: selects the best trusted route for a paired device without sending or executing anything
+- `mesh wg-init`: generates local WireGuard key material and publishes only public transport hints into the paired-device registry
+- `mesh approval-code`: generates an optional one-time operator approval code for sensitive encrypted commands
+- `mesh seal-command` / `mesh open-command`: create and verify signed, encrypted, replay-protected command envelopes for already-paired devices
+- `mesh prepare-command`: route-plans, seals, and optionally bundles an encrypted command artifact for later transport
+- `mesh bundle-create` / `mesh bundle-list`: store and inspect encrypted command-envelope bundles for file, serial, radio, or intermittent links
+- `web`: opens the local operator dashboard with tool requirements, detected devices, Pi controls, artifacts, and action logs
 - `doctor`: validates the remote appliance path before a remote capture run
 
 Official Windows remote-flow commands:
 
 ```powershell
-python .\videopipeline.py discover-remote
+.\discover_remote.ps1 -Save
 python .\videopipeline.py pair-remote --host pi@raspberrypi
 python .\videopipeline.py bootstrap-remote --host pi@raspberrypi
 python .\videopipeline.py doctor --host pi@raspberrypi --interface wlan0
@@ -142,6 +163,7 @@ For the full release checklist, see [`RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.m
 ## More docs
 
 - [`GETTING_STARTED.md`](GETTING_STARTED.md): setup and daily-use guide
+- [`docs/SECURE_DEVICE_MESH.md`](docs/SECURE_DEVICE_MESH.md): secure paired-device mesh plan and current command-envelope tooling for encrypted controller/appliance interaction over untrusted transports
 - [`ECOSYSTEM_MAP.md`](ECOSYSTEM_MAP.md): shortlist of external projects worth adapting, keeping external, or avoiding for this repo
 - [`docs/adr/0001-intelligence-platform-boundary.md`](docs/adr/0001-intelligence-platform-boundary.md): architecture decision record for the platform pivot and frozen package direction
 - [`docs/PLATFORM_WORKFLOW.md`](docs/PLATFORM_WORKFLOW.md): operator workflow for `intelpipeline` from intake through presentation and local API serving

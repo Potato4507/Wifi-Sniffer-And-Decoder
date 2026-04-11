@@ -54,6 +54,16 @@ def test_dashboard_update_config_persists_form_values(tmp_path) -> None:
             "ap_channel": ["11"],
             "wordlist_path": ["/tmp/wordlist.txt"],
             "deauth_count": ["0"],
+            "remote_host": ["david@raspi-sniffer"],
+            "remote_path": ["/home/david/wifi-pipeline/captures/"],
+            "remote_port": ["2222"],
+            "remote_identity": ["C:/Users/dwdow/.ssh/id_ed25519"],
+            "remote_interface": ["wlan0"],
+            "remote_install_mode": ["bundle"],
+            "remote_install_profile": ["standard"],
+            "remote_health_port": ["9876"],
+            "remote_dest_dir": [str(tmp_path / "remote_imports")],
+            "remote_poll_interval": ["3"],
         }
     )
 
@@ -83,8 +93,78 @@ def test_dashboard_update_config_persists_form_values(tmp_path) -> None:
     assert saved["ap_channel"] == 11
     assert saved["wordlist_path"] == "/tmp/wordlist.txt"
     assert saved["deauth_count"] == 0
+    assert saved["remote_host"] == "david@raspi-sniffer"
+    assert saved["remote_path"] == "/home/david/wifi-pipeline/captures/"
+    assert saved["remote_port"] == 2222
+    assert saved["remote_identity"] == "C:/Users/dwdow/.ssh/id_ed25519"
+    assert saved["remote_interface"] == "wlan0"
+    assert saved["remote_install_mode"] == "bundle"
+    assert saved["remote_install_profile"] == "standard"
+    assert saved["remote_health_port"] == 9876
+    assert saved["remote_dest_dir"] == str(tmp_path / "remote_imports")
+    assert saved["remote_poll_interval"] == 3
     assert state.logs[-1].action == "config"
     assert state.logs[-1].status == "ok"
+
+
+def test_dashboard_update_config_recovers_from_invalid_saved_numeric_values(tmp_path) -> None:
+    config_path = tmp_path / "lab.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "output_dir": str(tmp_path / "pipeline_output"),
+                "target_macs": "aa:bb:cc:dd:ee:ff",
+                "video_port": "not-a-port",
+                "capture_duration": "not-a-duration",
+                "custom_header_size": "not-a-size",
+                "min_candidate_bytes": "not-a-byte-count",
+                "jitter_buffer_packets": "not-a-buffer",
+                "corpus_review_threshold": "not-a-float",
+                "corpus_auto_reuse_threshold": "also-not-a-float",
+                "ap_channel": "not-a-channel",
+                "deauth_count": "not-a-count",
+                "remote_port": "not-a-port",
+                "remote_health_port": "not-a-health-port",
+                "remote_poll_interval": "not-an-interval",
+            }
+        ),
+        encoding="utf-8",
+    )
+    state = DashboardState(config_path=config_path)
+
+    message = state.update_config(
+        {
+            "video_port": ["still-bad"],
+            "capture_duration": ["still-bad"],
+            "custom_header_size": ["still-bad"],
+            "min_candidate_bytes": ["still-bad"],
+            "jitter_buffer_packets": ["still-bad"],
+            "corpus_review_threshold": ["still-bad"],
+            "corpus_auto_reuse_threshold": ["still-bad"],
+            "ap_channel": ["still-bad"],
+            "deauth_count": ["still-bad"],
+            "remote_port": ["still-bad"],
+            "remote_health_port": ["still-bad"],
+            "remote_poll_interval": ["still-bad"],
+        }
+    )
+
+    saved = load_config(str(config_path), quiet=True)
+
+    assert message == "Saved configuration."
+    assert saved["target_macs"] == ["aa:bb:cc:dd:ee:ff"]
+    assert saved["video_port"] == 5004
+    assert saved["capture_duration"] == 60
+    assert saved["custom_header_size"] == 0
+    assert saved["min_candidate_bytes"] == 4096
+    assert saved["jitter_buffer_packets"] == 24
+    assert saved["corpus_review_threshold"] == 0.62
+    assert saved["corpus_auto_reuse_threshold"] == 0.88
+    assert saved["ap_channel"] == 6
+    assert saved["deauth_count"] == 10
+    assert saved["remote_port"] == 22
+    assert saved["remote_health_port"] == 8741
+    assert saved["remote_poll_interval"] == 8
 
 
 def test_dashboard_execute_all_dispatches_pipeline(monkeypatch, tmp_path) -> None:
@@ -150,6 +230,72 @@ def test_dashboard_execute_all_dispatches_pipeline(monkeypatch, tmp_path) -> Non
     assert seen["decrypted_dir"] == str(tmp_path / "decrypted")
 
 
+def test_dashboard_execute_remote_actions_and_records_reports(monkeypatch, tmp_path) -> None:
+    config_path = tmp_path / "lab.json"
+    output_dir = tmp_path / "pipeline_output"
+    save_config(
+        {
+            "output_dir": str(output_dir),
+            "remote_host": "david@raspi-sniffer",
+            "remote_interface": "wlan0",
+            "remote_dest_dir": str(tmp_path / "remote_imports"),
+            "capture_duration": 7,
+        },
+        str(config_path),
+        quiet=True,
+    )
+    state = DashboardState(config_path=config_path)
+    pulled_path = tmp_path / "remote_imports" / "capture.pcap"
+
+    monkeypatch.setattr(
+        "wifi_pipeline.webapp.discover_remote_appliances",
+        lambda config: [
+            {
+                "host": "raspi-sniffer",
+                "ssh_target": "david@raspi-sniffer",
+                "health_endpoint": "http://raspi-sniffer:8741/health",
+                "health_port": "8741",
+                "capture_dir": "/home/david/wifi-pipeline/captures",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        "wifi_pipeline.webapp.doctor_remote_host",
+        lambda config, **kwargs: {
+            "ok": True,
+            "remote": {
+                "reachable": True,
+                "service_status": "idle",
+                "tcpdump": True,
+                "iw": True,
+                "health_endpoint": "http://raspi-sniffer:8741/health",
+                "health_probe_ok": True,
+            },
+        },
+    )
+    monkeypatch.setattr(
+        "wifi_pipeline.webapp.bootstrap_remote_host",
+        lambda config, **kwargs: {"capture_dir": "/home/david/wifi-pipeline/captures"},
+    )
+    monkeypatch.setattr(
+        "wifi_pipeline.webapp.remote_service_host",
+        lambda config, action, **kwargs: {"service_status": "idle", "last_capture": "/tmp/last.pcap", "output": "/tmp/new.pcap"},
+    )
+    monkeypatch.setattr("wifi_pipeline.webapp.start_remote_capture", lambda config, **kwargs: pulled_path)
+    monkeypatch.setattr("wifi_pipeline.webapp.pull_remote_capture", lambda config, **kwargs: pulled_path)
+
+    assert "Discovered 1 remote appliance" in state._execute_action("discover_remote", {})
+    assert (output_dir / "remote_discovery.json").exists()
+
+    assert state._execute_action("remote_doctor", {}) == "Remote doctor passed."
+    assert (output_dir / "remote_doctor_report.json").exists()
+
+    assert "Remote bootstrap complete" in state._execute_action("bootstrap_remote", {})
+    assert "Remote service status: idle" == state._execute_action("remote_status", {})
+    assert "Remote capture imported" in state._execute_action("start_remote", {})
+    assert "Remote capture pulled" in state._execute_action("pull_remote", {})
+
+
 def test_render_dashboard_html_shows_busy_state_and_escaped_logs() -> None:
     html = render_dashboard_html(
         {
@@ -162,6 +308,15 @@ def test_render_dashboard_html_shows_busy_state_and_escaped_logs() -> None:
                 "target_macs": [],
                 "monitor_method": "airodump",
                 "playback_mode": "both",
+                "remote_host": "david@raspi-sniffer",
+                "remote_interface": "wlan0",
+                "remote_path": "/home/david/wifi-pipeline/captures/",
+                "remote_port": 22,
+                "remote_dest_dir": "./pipeline_output/remote_imports",
+                "remote_health_port": 8741,
+                "remote_poll_interval": 8,
+                "remote_install_mode": "auto",
+                "remote_install_profile": "appliance",
             },
             "bundle": {
                 "detection": {"selected_candidate_stream": {"stream_id": "stream-1", "candidate_class": "jpeg", "score": 0.9}},
@@ -228,6 +383,38 @@ def test_render_dashboard_html_shows_busy_state_and_escaped_logs() -> None:
                 "corpus_status": {},
                 "interfaces": [],
                 "artifacts": [{"label": "Capture", "path": "C:/tmp/capture.pcapng", "exists": True}],
+                "operator_inventory": {
+                    "headline": "1 ready tool, 0 blocked tools, 1 device.",
+                    "tools": [
+                        {
+                            "label": "Remote capture + pull",
+                            "category": "Raspberry Pi",
+                            "status": "ready",
+                            "summary": "Capture on the Pi and import locally.",
+                            "action": "start_remote",
+                            "next_step": "Run Capture + Pull.",
+                            "requirements": [
+                                {
+                                    "label": "Remote host",
+                                    "value": "david@raspi-sniffer",
+                                    "status": "ready",
+                                    "detail": "Configured.",
+                                    "required": True,
+                                }
+                            ],
+                        }
+                    ],
+                    "devices": [
+                        {
+                            "name": "david@raspi-sniffer",
+                            "scope": "Raspberry Pi appliance",
+                            "status": "ready",
+                            "role": "Configured remote capture node",
+                            "summary": "http://raspi-sniffer:8741/health",
+                            "details": ["Interface: wlan0", "Service: idle"],
+                        }
+                    ],
+                },
             },
             "logs": [ActionLog(timestamp=time.time(), action="detect", status="ok", message="Saved <config>", output="A&B")],
             "busy": True,
@@ -249,9 +436,128 @@ def test_render_dashboard_html_shows_busy_state_and_escaped_logs() -> None:
     assert "Windows controller + Linux appliance / privilege=user" in html
     assert "Prefer the Linux appliance path for full Wi-Fi lab work." in html
     assert "Workflow Capabilities" in html
+    assert "Operator Console" in html
+    assert "Tool Requirements" in html
+    assert "Detected Devices" in html
+    assert "Remote capture + pull" in html
+    assert "david@raspi-sniffer" in html
+    assert "Remote Doctor" in html
+    assert "Remote Host" in html
     assert "Replay + WPA Readiness" in html
     assert "Capture more payload before replaying." in html
     assert "Capture a handshake before retrying WPA decrypt." in html
+
+
+def test_render_dashboard_html_tolerates_malformed_snapshot_sections() -> None:
+    html = render_dashboard_html(
+        {
+            "config": {
+                "target_macs": "aa:bb:cc:dd:ee:ff",
+                "protocol": "udp",
+                "monitor_method": "airodump",
+                "playback_mode": "both",
+            },
+            "bundle": {
+                "analysis": {
+                    "hypotheses": "not-a-list",
+                    "recommendations": "Capture more <payload>.",
+                    "ciphertext_observations": "not-a-dict",
+                },
+                "status_bundle": {
+                    "machine_summary": {
+                        "headline": "Controller view",
+                        "items": [
+                            "bad-machine-row",
+                            {
+                                "label": "Controller <A>",
+                                "status": "limited",
+                                "summary": "Usable with caveats.",
+                                "reason": "Missing optional adapter.",
+                                "next_step": "Use the Pi.",
+                            },
+                        ],
+                    },
+                    "workflow": [
+                        "bad-workflow-row",
+                        {
+                            "area": "Capture <flow>",
+                            "status": "limited",
+                            "summary": "Flow survives malformed rows.",
+                            "reasons": "Single reason <ok>",
+                            "next_steps": "Single next step <ok>",
+                        },
+                    ],
+                    "selection": {"status": "limited", "notes": "single note", "next_steps": "single selection step"},
+                    "replay": {
+                        "status": "limited",
+                        "reasons": "single replay reason",
+                        "next_steps": "single replay step",
+                        "confidence": "not-a-dict",
+                    },
+                    "wpa": {"status": "blocked", "reasons": "single WPA reason", "next_steps": "single WPA step"},
+                },
+                "operator_inventory": {
+                    "tools": [
+                        "bad-tool-row",
+                        {
+                            "label": "Tool <x>",
+                            "category": "Raspberry Pi",
+                            "status": "ready",
+                            "summary": "Runs safely.",
+                            "requirements": "malformed requirement row",
+                            "next_step": "Run it.",
+                        },
+                    ],
+                    "devices": [
+                        "bad-device-row",
+                        {
+                            "name": "Device <x>",
+                            "scope": "secure mesh",
+                            "status": "ready",
+                            "role": "Peer",
+                            "summary": "Detected.",
+                            "details": "single detail",
+                        },
+                    ],
+                },
+                "candidate_rows": [
+                    "bad-candidate-row",
+                    {"candidate_class": "jpeg", "score": 0.5, "stream_id": "stream<1>", "byte_count": 123},
+                ],
+                "corpus_entries": [
+                    "bad-corpus-row",
+                    {
+                        "entry_id": "entry<1>",
+                        "candidate_class": "jpeg",
+                        "dominant_unit_type": "image",
+                        "candidate_material_available": True,
+                        "stream_id": "stream<1>",
+                    },
+                ],
+                "corpus_status": {"latest_entry": "not-a-dict"},
+                "interfaces": ["bad-interface-row", ("1", "wlan0", "Wireless <adapter>")],
+                "artifacts": ["bad-artifact-row", {"label": "Capture <cap>", "path": "C:/tmp/<cap>.pcap", "exists": True}],
+            },
+            "logs": [
+                "bad-log-row",
+                {"timestamp": "not-a-timestamp", "action": "detect", "status": "ok<script>", "message": "Saved <x>", "output": "A&B"},
+            ],
+        },
+        capture_path="C:/tmp/capture.pcap",
+    )
+
+    assert "Controller &lt;A&gt;" in html
+    assert "Capture &lt;flow&gt;" in html
+    assert "Single reason &lt;ok&gt;" in html
+    assert "Tool &lt;x&gt;" in html
+    assert "Device &lt;x&gt;" in html
+    assert "stream&lt;1&gt;" in html
+    assert "entry&lt;1&gt;" in html
+    assert "Wireless &lt;adapter&gt;" in html
+    assert "Capture &lt;cap&gt;" in html
+    assert "Saved &lt;x&gt;" in html
+    assert "A&amp;B" in html
+    assert "Capture more &lt;payload&gt;." in html
 
 
 def test_dashboard_snapshot_includes_shared_status_bundle(monkeypatch, tmp_path) -> None:
@@ -280,6 +586,8 @@ def test_dashboard_snapshot_includes_shared_status_bundle(monkeypatch, tmp_path)
     assert snapshot["bundle"]["status_bundle"]["machine_summary"]["headline"] == "Ubuntu standalone / privilege=root"
     assert snapshot["bundle"]["status_bundle"]["workflow"][0]["area"] == "local packet capture"
     assert snapshot["bundle"]["status_bundle"]["replay"]["status"] == "ready"
+    assert snapshot["bundle"]["operator_inventory"]["tools"]
+    assert any(tool["label"] == "Remote doctor" for tool in snapshot["bundle"]["operator_inventory"]["tools"])
 
 
 def test_dashboard_http_routes_smoke(monkeypatch, tmp_path) -> None:

@@ -124,6 +124,7 @@ if [[ "$FULL" -eq 1 ]]; then
                 aircrack-ng \
                 hashcat \
                 hcxtools \
+                iw \
                 openssh-client \
                 tcpdump \
                 wireshark \

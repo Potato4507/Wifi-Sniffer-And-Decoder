@@ -81,9 +81,12 @@ def test_candidate_discovery_hosts_preserves_priority_and_applies_limit() -> Non
     assert hosts.count("10.0.0.8") == 1
 
 
-def test_probe_remote_appliance_applies_defaults_and_user_hint(monkeypatch) -> None:
+def test_probe_remote_appliance_applies_defaults_user_hint_and_mesh_hints(monkeypatch) -> None:
     payload = (
-        b'{"protocol":"capture-agent/v1","data":{"agent":"yes","device_name":"pi-node","agent_version":"3.0.0"}}'
+        b'{"protocol":"capture-agent/v1","data":{"agent":"yes","device_name":"pi-node",'
+        b'"agent_version":"3.0.0","secure_mesh_device_id":"raspi-sniffer",'
+        b'"secure_mesh_fingerprint":"ABCD-1234","wireguard_endpoint":"10.77.0.2",'
+        b'"hotspot_ssid":"wifi-pipeline-raspi"}}'
     )
 
     monkeypatch.setattr(
@@ -102,6 +105,10 @@ def test_probe_remote_appliance_applies_defaults_and_user_hint(monkeypatch) -> N
     assert record["health_path"] == "/health"
     assert record["control_mode"] == "agent"
     assert record["ssh_user"] == "pi"
+    assert record["secure_mesh_device_id"] == "raspi-sniffer"
+    assert record["secure_mesh_fingerprint"] == "ABCD-1234"
+    assert record["wireguard_endpoint"] == "10.77.0.2"
+    assert record["hotspot_ssid"] == "wifi-pipeline-raspi"
 
 
 def test_probe_remote_appliance_rejects_invalid_payloads(monkeypatch) -> None:

@@ -68,6 +68,31 @@ def test_guess_unit_type_and_mappings() -> None:
     assert protocols.suggested_extension("plain_text") == ".txt"
 
 
+def test_nal_detection_prefers_real_h264_over_text_like_false_positives() -> None:
+    h264_sample = (
+        b"\x00\x00\x00\x01\x67\x64\x00\x1f\xac\xd9\x40\x78"
+        b"\x00\x00\x00\x01\x68\xee\x3c\x80"
+        b"\x00\x00\x00\x01\x65\x88\x84\x21\xa0"
+    )
+    nals, codec = protocols.split_nal_units(h264_sample)
+
+    assert codec == "h264"
+    assert len(nals) == 3
+    assert protocols.guess_unit_type(h264_sample) == "h264_nal"
+
+    ssh_like = (
+        b"\x00" * 55
+        + b"\x00\x00\x01\x0ecurve25519-sha256,curve25519-sha256@libssh.org"
+        + b"\x00" * 64
+        + b"\x00\x00\x01\xcfssh-ed25519-cert-v01@openssh.com,ssh-ed25519"
+    )
+    false_nals, false_codec = protocols.split_nal_units(ssh_like)
+
+    assert false_nals == []
+    assert false_codec is None
+    assert protocols.guess_unit_type(ssh_like) == "opaque_chunk"
+
+
 def test_protocol_support_profiles_and_stream_summary() -> None:
     png = protocols.protocol_support("png_image")
     opaque = protocols.protocol_support("opaque_chunk")

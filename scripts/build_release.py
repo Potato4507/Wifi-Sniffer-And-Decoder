@@ -24,6 +24,8 @@ INCLUDE_PATHS = (
     "requirements-dev.txt",
     "install_deps.ps1",
     "install_deps.sh",
+    "discover_remote.ps1",
+    "discover_remote.bat",
     "run_local.sh",
     "run_remote.ps1",
     "run_remote.bat",

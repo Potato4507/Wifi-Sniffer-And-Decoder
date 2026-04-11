@@ -20,8 +20,24 @@ else:
     CYAN = GREEN = YELLOW = RED = BOLD = DIM = RESET = ""
 
 
+def _print_line(text: str) -> None:
+    try:
+        print(text)
+    except UnicodeEncodeError:
+        stream = sys.stdout
+        encoding = getattr(stream, "encoding", None) or "utf-8"
+        payload = (text + "\n").encode(encoding, errors="replace")
+        buffer = getattr(stream, "buffer", None)
+        if buffer is not None:
+            buffer.write(payload)
+            buffer.flush()
+            return
+        stream.write(payload.decode(encoding, errors="replace"))
+        stream.flush()
+
+
 def banner() -> None:
-    print(
+    _print_line(
         f"""
 {CYAN}{BOLD}+------------------------------------------------------------+
 |                 WIFI STREAM PIPELINE v2.0                  |
@@ -33,27 +49,27 @@ def banner() -> None:
 
 def section(title: str) -> None:
     rule = "-" * max(8, 60 - len(title))
-    print(f"\n{CYAN}{BOLD}-- {title} {rule}{RESET}")
+    _print_line(f"\n{CYAN}{BOLD}-- {title} {rule}{RESET}")
 
 
 def ok(message: str) -> None:
-    print(f"{GREEN}[+]{RESET} {message}")
+    _print_line(f"{GREEN}[+]{RESET} {message}")
 
 
 def info(message: str) -> None:
-    print(f"{CYAN}[*]{RESET} {message}")
+    _print_line(f"{CYAN}[*]{RESET} {message}")
 
 
 def warn(message: str) -> None:
-    print(f"{YELLOW}[!]{RESET} {message}")
+    _print_line(f"{YELLOW}[!]{RESET} {message}")
 
 
 def err(message: str) -> None:
-    print(f"{RED}[x]{RESET} {message}")
+    _print_line(f"{RED}[x]{RESET} {message}")
 
 
 def done(message: str) -> None:
-    print(f"{GREEN}{BOLD}[ok]{RESET} {message}")
+    _print_line(f"{GREEN}{BOLD}[ok]{RESET} {message}")
 
 
 def ask(prompt: str, default: Optional[str] = None, secret: bool = False) -> str:
